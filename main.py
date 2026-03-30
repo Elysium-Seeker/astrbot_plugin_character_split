@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.2")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.3")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -62,7 +62,10 @@ class CharacterSplitPlugin(Star):
     async def terminate(self):
         await self._state_store.save_state()
 
-    @filter.command("mode")
+    @filter.command(
+        "mode",
+        desc="模式管理指令：/mode status 查看当前模式与判定来源；/mode set work|rest|auto 进行手动覆盖或恢复自动判定。",
+    )
     async def mode(self, event: Any):
         """Manage mode split behavior. Usage: /mode help"""
         args = self._parse_mode_args(getattr(event, "message_str", ""))
@@ -118,7 +121,10 @@ class CharacterSplitPlugin(Star):
 
         yield event.plain_result(self._help_text())
 
-    @filter.on_llm_request(priority=10)
+    @filter.on_llm_request(
+        priority=10,
+        desc="LLM 请求前置钩子：按 override/time/whitelist/default 判定 work/rest，切换对应会话并注入模式增强提示词。",
+    )
     async def on_llm_request(self, event: Any, req: Any):
         try:
             session_id, umo = self._get_session_identifiers(event)

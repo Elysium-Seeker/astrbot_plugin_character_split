@@ -1,0 +1,57 @@
+from typing import Any, Optional
+
+from .state_store import StateStore
+
+
+class ConversationSplitter:
+    def __init__(self, state_store: StateStore, logger: Any):
+        self._state_store = state_store
+        self._logger = logger
+
+    async def ensure_mode_conversation(self, context: Any, event: Any, mode: str):
+        conv_mgr = getattr(context, "conversation_manager", None)
+        if conv_mgr is None:
+            return
+
+        umo = getattr(event, "unified_msg_origin", "")
+        if not umo:
+            return
+
+        await self._state_store.ensure_state()
+        target_cid = self._state_store.get_mode_conversation_id(umo, mode)
+
+        if target_cid:
+            try:
+                curr_cid = await conv_mgr.get_curr_conversation_id(umo)
+                if curr_cid != target_cid:
+                    await conv_mgr.switch_conversation(umo, target_cid)
+                return
+            except Exception:
+                self._state_store.remove_mode_conversation_id(umo, mode)
+
+        new_title = f"{mode}:{getattr(event, 'get_sender_name', lambda: 'user')()}"
+        new_cid = await self._new_conversation(conv_mgr, umo, new_title)
+        if new_cid:
+            self._state_store.set_mode_conversation_id(umo, mode, new_cid)
+            await self._state_store.save_state()
+
+    async def _new_conversation(self, conv_mgr: Any, umo: str, title: str) -> Optional[str]:
+        try:
+            return await conv_mgr.new_conversation(unified_msg_origin=umo, title=title)
+        except TypeError:
+            pass
+        except Exception as exc:
+            self._logger.warning(f"new_conversation failed (keywords): {exc}")
+
+        try:
+            return await conv_mgr.new_conversation(umo, title=title)
+        except TypeError:
+            pass
+        except Exception as exc:
+            self._logger.warning(f"new_conversation failed (positional with title): {exc}")
+
+        try:
+            return await conv_mgr.new_conversation(umo)
+        except Exception as exc:
+            self._logger.error(f"new_conversation failed: {exc}")
+            return None

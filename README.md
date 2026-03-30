@@ -10,6 +10,16 @@
 
 长期记忆统一由 `astrbot_plugin_mnemosyne` 处理。
 
+## 工程结构
+
+- `main.py`: 插件薄入口（命令、钩子、模块编排）
+- `runtime.py`: AstrBot 运行时导入与无依赖 fallback
+- `core/config.py`: 配置读取与时间解析
+- `core/state_store.py`: 状态持久化（override + 会话映射）
+- `core/mode_resolver.py`: 模式判定（override > time > whitelist > default）
+- `core/persona_prompt.py`: 人格提示词拼接（核心人格 + 模式增强）
+- `core/conversation_splitter.py`: work/rest 对话切换与创建
+
 ## 实际行为
 
 1. 对话分流
@@ -87,3 +97,11 @@
 1. 在 mnemosyne 里执行 `/memory init`
 2. 用 `/memory get_session_id` 确认会话 ID
 3. 在本插件执行 `/persona status`，确认模式与会话标识
+
+## 本地测试建议
+
+1. 先把 `work_time_windows` 设成当前时间命中的区间，再执行 `/persona status`，确认返回 `mode: work (time)`。
+2. 再改成不命中当前时间的区间，执行 `/persona status`，确认返回 `mode: rest (time)`。
+3. 执行 `/persona set work`，确认返回覆盖生效，并再次 `/persona status` 显示 `override`。
+4. 执行 `/persona set auto` 清除覆盖，确认回到时间判定。
+5. 连续在 work/rest 两种模式对话，观察上下文隔离是否生效，同时记忆召回仍由 mnemosyne 统一提供。

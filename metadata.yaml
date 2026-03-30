@@ -1,8 +1,7 @@
-# yaml-language-server: $schema=
 name: astrbot_plugin_character_split
 display_name: WorkRest Character Split
 desc: 工作与休息模式分离对话，共享记忆的人格切换插件
-version: v1.0.0
+version: v0.1.0
 author: Copilot
 repo: https://github.com/yourname/astrbot_plugin_character_split
 astrbot_version: ">=4.9.2,<5"

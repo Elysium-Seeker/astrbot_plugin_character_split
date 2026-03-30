@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.3")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.4")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -64,7 +64,13 @@ class CharacterSplitPlugin(Star):
 
     @filter.command(
         "mode",
-        desc="模式管理指令：/mode status 查看当前模式与判定来源；/mode set work|rest|auto 进行手动覆盖或恢复自动判定。",
+        desc=(
+            "模式管理指令:\n"
+            "- /mode status: 查看当前模式与判定来源。\n"
+            "- /mode set work: 当前会话固定为工作模式。\n"
+            "- /mode set rest: 当前会话固定为休息模式。\n"
+            "- /mode set auto: 清除覆盖，恢复自动判定。"
+        ),
     )
     async def mode(self, event: Any):
         """Manage mode split behavior. Usage: /mode help"""

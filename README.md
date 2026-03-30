@@ -41,6 +41,10 @@
 - 本插件不维护本地长期记忆。
 - 推荐并默认与 mnemosyne 搭配，记忆统一由 mnemosyne 注入。
 
+5. 切模式前 checkpoint（best-effort）
+- 当 work/rest 会话发生切换时，插件会先尝试触发 mnemosyne 一次即时 checkpoint。
+- 这是“尽力触发”，失败不会中断对话切换流程。
+
 ## 指令
 
 - `/mode help` 查看指令帮助
@@ -59,6 +63,7 @@
 - `default_mode`: 兜底模式（时间规则和白名单都未命中时）
 - `work_sessions`: 工作模式白名单（时间规则之后的补充分流）
 - `rest_sessions`: 休息模式白名单（时间规则之后的补充分流）
+- `flush_mnemosyne_on_mode_switch`: 切模式前是否尝试触发一次 mnemosyne checkpoint（默认 true）
 - `core_persona_prompt`: 同一人格核心设定
 - `work_persona_prompt`: 工作模式增强提示词
 - `rest_persona_prompt`: 休息模式增强提示词

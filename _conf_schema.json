@@ -35,6 +35,11 @@
     "type": "text",
     "default": ""
   },
+  "flush_mnemosyne_on_mode_switch": {
+    "description": "切换 work/rest 会话前，尽力触发一次 mnemosyne 记忆 checkpoint",
+    "type": "bool",
+    "default": true
+  },
   "core_persona_prompt": {
     "description": "同一人格核心设定（work/rest 共用）",
     "type": "text",

@@ -8,7 +8,13 @@ class ConversationSplitter:
         self._state_store = state_store
         self._logger = logger
 
-    async def ensure_mode_conversation(self, context: Any, event: Any, mode: str):
+    async def ensure_mode_conversation(
+        self,
+        context: Any,
+        event: Any,
+        mode: str,
+        pre_switch_hook: Any = None,
+    ):
         conv_mgr = getattr(context, "conversation_manager", None)
         if conv_mgr is None:
             return
@@ -19,21 +25,39 @@ class ConversationSplitter:
 
         await self._state_store.ensure_state()
         target_cid = self._state_store.get_mode_conversation_id(umo, mode)
+        curr_cid: Optional[str] = None
+        try:
+            curr_cid = await conv_mgr.get_curr_conversation_id(umo)
+        except Exception:
+            curr_cid = None
 
         if target_cid:
             try:
-                curr_cid = await conv_mgr.get_curr_conversation_id(umo)
                 if curr_cid != target_cid:
+                    await self._run_pre_switch_hook(pre_switch_hook)
                     await conv_mgr.switch_conversation(umo, target_cid)
                 return
             except Exception:
                 self._state_store.remove_mode_conversation_id(umo, mode)
+
+        if curr_cid:
+            await self._run_pre_switch_hook(pre_switch_hook)
 
         new_title = f"{mode}:{getattr(event, 'get_sender_name', lambda: 'user')()}"
         new_cid = await self._new_conversation(conv_mgr, umo, new_title)
         if new_cid:
             self._state_store.set_mode_conversation_id(umo, mode, new_cid)
             await self._state_store.save_state()
+
+    async def _run_pre_switch_hook(self, hook: Any):
+        if hook is None:
+            return
+        try:
+            result = hook()
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as exc:
+            self._logger.warning(f"pre-switch hook failed: {exc}")
 
     async def _new_conversation(self, conv_mgr: Any, umo: str, title: str) -> Optional[str]:
         try:

@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.5")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.6")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -125,7 +125,12 @@ class CharacterSplitPlugin(Star):
         try:
             session_id, umo = self._get_session_identifiers(event)
             mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
-            await self._conversation_splitter.ensure_mode_conversation(self.context, event, mode)
+            await self._conversation_splitter.ensure_mode_conversation(
+                self.context,
+                event,
+                mode,
+                pre_switch_hook=lambda: self._trigger_mnemosyne_checkpoint(event),
+            )
 
             persona_prompt = self._persona_builder.build(mode)
             old_prompt = getattr(req, "system_prompt", "") or ""
@@ -133,6 +138,78 @@ class CharacterSplitPlugin(Star):
             req.system_prompt = merged
         except Exception as exc:
             logger.error(f"character_split on_llm_request failed: {exc}")
+
+    async def _trigger_mnemosyne_checkpoint(self, event: Any):
+        if not self._split_config.get_bool("flush_mnemosyne_on_mode_switch", True):
+            return
+
+        if hasattr(event, "set_extra"):
+            try:
+                event.set_extra("mnemosyne_mode_switch_checkpoint", True)
+            except Exception:
+                pass
+
+        get_all_stars = getattr(self.context, "get_all_stars", None)
+        if not callable(get_all_stars):
+            return
+
+        stars = get_all_stars()
+        if hasattr(stars, "__await__"):
+            stars = await stars
+        stars = stars or []
+        if isinstance(stars, dict):
+            stars = list(stars.values())
+
+        candidate_methods = [
+            "checkpoint_now",
+            "flush_memory",
+            "save_memory_now",
+            "force_extract_memory",
+            "extract_memory_now",
+            "trigger_memory_extraction",
+        ]
+
+        for star in stars:
+            star_name = str(getattr(star, "name", "") or "").lower()
+            root_name = str(getattr(star, "root_dir_name", "") or "").lower()
+            if "mnemosyne" not in star_name and "mnemosyne" not in root_name:
+                continue
+
+            candidates = []
+            for attr in ("star_obj", "plugin", "instance", "star", "star_cls"):
+                obj = getattr(star, attr, None)
+                if obj is not None:
+                    candidates.append(obj)
+            candidates.append(star)
+
+            seen_ids = set()
+            for plugin_obj in candidates:
+                obj_id = id(plugin_obj)
+                if obj_id in seen_ids:
+                    continue
+                seen_ids.add(obj_id)
+
+                for method_name in candidate_methods:
+                    method = getattr(plugin_obj, method_name, None)
+                    if not callable(method):
+                        continue
+
+                    for args in ((event,), tuple()):
+                        try:
+                            result = method(*args)
+                            if hasattr(result, "__await__"):
+                                await result
+                            logger.info(
+                                f"character_split mnemosyne checkpoint via {method_name} succeeded"
+                            )
+                            return
+                        except TypeError:
+                            continue
+                        except Exception as exc:
+                            logger.warning(
+                                f"character_split mnemosyne checkpoint via {method_name} failed: {exc}"
+                            )
+                            break
 
     def _create_state_store(self) -> StateStore:
         return StateStore(

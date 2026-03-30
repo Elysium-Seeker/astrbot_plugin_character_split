@@ -43,10 +43,12 @@
 
 ## 指令
 
+- `/mode help` 查看指令帮助
 - `/mode status` 查看当前模式与会话标识
-- `/mode set work` 当前会话固定为工作模式
-- `/mode set rest` 当前会话固定为休息模式
-- `/mode set auto` 清除手动覆盖，回到配置判定
+- `/mode work` 当前会话固定为工作模式
+- `/mode rest` 当前会话固定为休息模式
+- `/mode auto` 清除手动覆盖，回到自动判定
+- `/mode set work|rest|auto` 兼容旧用法
 
 ## 配置项（WebUI）
 
@@ -102,6 +104,6 @@
 
 1. 先把 `work_time_windows` 设成当前时间命中的区间，再执行 `/mode status`，确认返回 `mode: work (time)`。
 2. 再改成不命中当前时间的区间，执行 `/mode status`，确认返回 `mode: rest (time)`。
-3. 执行 `/mode set work`，确认返回覆盖生效，并再次 `/mode status` 显示 `override`。
-4. 执行 `/mode set auto` 清除覆盖，确认回到时间判定。
+3. 执行 `/mode work`，确认返回覆盖生效，并再次 `/mode status` 显示 `override`。
+4. 执行 `/mode auto` 清除覆盖，确认回到时间判定。
 5. 连续在 work/rest 两种模式对话，观察上下文隔离是否生效，同时记忆召回仍由 mnemosyne 统一提供。

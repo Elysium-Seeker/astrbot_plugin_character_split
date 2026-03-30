@@ -28,6 +28,14 @@ except Exception:  # pragma: no cover
         def error(self, msg: str):
             print(msg)
 
+    class _DummyCommandGroup:
+        @staticmethod
+        def command(*_args: Any, **_kwargs: Any):
+            def _decorator(func: Any):
+                return func
+
+            return _decorator
+
     class _DummyFilter:
         @staticmethod
         def command(*_args: Any, **_kwargs: Any):
@@ -40,6 +48,13 @@ except Exception:  # pragma: no cover
         def on_llm_request(*_args: Any, **_kwargs: Any):
             def _decorator(func: Any):
                 return func
+
+            return _decorator
+
+        @staticmethod
+        def command_group(*_args: Any, **_kwargs: Any):
+            def _decorator(_func: Any):
+                return _DummyCommandGroup()
 
             return _decorator
 

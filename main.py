@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.4")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.5")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -62,70 +62,60 @@ class CharacterSplitPlugin(Star):
     async def terminate(self):
         await self._state_store.save_state()
 
-    @filter.command(
+    @filter.command_group(
         "mode",
-        desc=(
-            "模式管理指令:\n"
-            "- /mode status: 查看当前模式与判定来源。\n"
-            "- /mode set work: 当前会话固定为工作模式。\n"
-            "- /mode set rest: 当前会话固定为休息模式。\n"
-            "- /mode set auto: 清除覆盖，恢复自动判定。"
-        ),
+        desc="模式管理指令组。",
     )
-    async def mode(self, event: Any):
-        """Manage mode split behavior. Usage: /mode help"""
-        args = self._parse_mode_args(getattr(event, "message_str", ""))
-        if not args:
-            yield event.plain_result(self._help_text())
-            return
+    def mode(self):
+        """Mode command group"""
 
-        action = args[0].lower()
-        if action == "help":
-            yield event.plain_result(self._help_text())
-            return
-
-        session_id, umo = self._get_session_identifiers(event)
-        key = session_id or umo
-
-        if action == "status":
-            mode, source = await self._mode_resolver.resolve_mode(session_id, umo)
-            text = (
-                f"mode: {mode} ({source})\n"
-                "memory_backend: mnemosyne\n"
-                f"local_time: {self._split_config.current_time_desc()}\n"
-                f"session_id: {session_id or '-'}\n"
-                f"umo: {umo or '-'}"
-            )
-            yield event.plain_result(text)
-            return
-
-        if action == "set":
-            if len(args) < 2:
-                yield event.plain_result("Usage: /mode set work|rest|auto")
-                return
-
-            target = args[1].lower()
-            if not key:
-                yield event.plain_result("Cannot determine current session key.")
-                return
-
-            await self._state_store.ensure_state()
-            if target == "auto":
-                self._state_store.clear_session_override(key)
-                await self._state_store.save_state()
-                yield event.plain_result("Session mode override cleared.")
-                return
-
-            if target not in MODE_SET:
-                yield event.plain_result("Usage: /mode set work|rest|auto")
-                return
-
-            self._state_store.set_session_override(key, target)
-            await self._state_store.save_state()
-            yield event.plain_result(f"Session override set to: {target}")
-            return
-
+    @mode.command("help", desc="查看 mode 指令帮助。")
+    async def mode_help(self, event: Any):
+        """Show mode command help"""
         yield event.plain_result(self._help_text())
+
+    @mode.command("status", desc="查看当前模式与判定来源。")
+    async def mode_status(self, event: Any):
+        """Show current mode status"""
+        session_id, umo = self._get_session_identifiers(event)
+        mode, source = await self._mode_resolver.resolve_mode(session_id, umo)
+        text = (
+            f"mode: {mode} ({source})\n"
+            "memory_backend: mnemosyne\n"
+            f"local_time: {self._split_config.current_time_desc()}\n"
+            f"session_id: {session_id or '-'}\n"
+            f"umo: {umo or '-'}"
+        )
+        yield event.plain_result(text)
+
+    @mode.command("work", desc="当前会话固定为工作模式。")
+    async def mode_work(self, event: Any):
+        """Force work mode for current session"""
+        msg = await self._set_mode_override(event, "work")
+        yield event.plain_result(msg)
+
+    @mode.command("rest", desc="当前会话固定为休息模式。")
+    async def mode_rest(self, event: Any):
+        """Force rest mode for current session"""
+        msg = await self._set_mode_override(event, "rest")
+        yield event.plain_result(msg)
+
+    @mode.command("auto", desc="清除覆盖，恢复自动判定。")
+    async def mode_auto(self, event: Any):
+        """Reset to auto mode resolution"""
+        msg = await self._set_mode_override(event, "auto")
+        yield event.plain_result(msg)
+
+    @mode.command("set", desc="兼容旧用法：/mode set work|rest|auto。")
+    async def mode_set(self, event: Any, target: str = ""):
+        """Compatibility command for /mode set work|rest|auto"""
+        target = (target or "").strip().lower()
+        if target not in MODE_SET and target != "auto":
+            yield event.plain_result("Usage: /mode set work|rest|auto")
+            return
+
+        msg = await self._set_mode_override(event, target)
+        yield event.plain_result(msg)
 
     @filter.on_llm_request(
         priority=10,
@@ -154,15 +144,24 @@ class CharacterSplitPlugin(Star):
             put_kv_data_func=getattr(self, "put_kv_data", None),
         )
 
-    def _parse_mode_args(self, message_str: str) -> List[str]:
-        tokens = (message_str or "").strip().split()
-        if not tokens:
-            return []
+    async def _set_mode_override(self, event: Any, target: str) -> str:
+        session_id, umo = self._get_session_identifiers(event)
+        key = session_id or umo
+        if not key:
+            return "Cannot determine current session key."
 
-        head = tokens[0].lstrip("/").lower()
-        if head == "mode":
-            return tokens[1:]
-        return tokens
+        await self._state_store.ensure_state()
+        if target == "auto":
+            self._state_store.clear_session_override(key)
+            await self._state_store.save_state()
+            return "Session mode override cleared."
+
+        if target not in MODE_SET:
+            return "Usage: /mode set work|rest|auto"
+
+        self._state_store.set_session_override(key, target)
+        await self._state_store.save_state()
+        return f"Session override set to: {target}"
 
     def _get_session_identifiers(self, event: Any) -> Tuple[str, str]:
         session_id = ""
@@ -175,6 +174,10 @@ class CharacterSplitPlugin(Star):
     def _help_text(self) -> str:
         return (
             "Character Split Commands:\n"
+            "/mode help\n"
             "/mode status\n"
+            "/mode work\n"
+            "/mode rest\n"
+            "/mode auto\n"
             "/mode set work|rest|auto"
         )

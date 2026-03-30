@@ -118,7 +118,12 @@ class StateStore:
 
     def _state_file_path(self) -> Path:
         if self._get_data_path_func is not None:
-            base = self._get_data_path_func() / "plugin_data" / self._plugin_name
+            try:
+                raw_base = self._get_data_path_func()
+                base_root = raw_base if isinstance(raw_base, Path) else Path(str(raw_base))
+                base = base_root / "plugin_data" / self._plugin_name
+            except Exception:
+                base = Path(__file__).resolve().parent.parent / "data"
         else:
             base = Path(__file__).resolve().parent.parent / "data"
 

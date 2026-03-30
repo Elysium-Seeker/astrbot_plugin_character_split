@@ -43,10 +43,10 @@
 
 ## 指令
 
-- `/persona status` 查看当前模式与会话标识
-- `/persona set work` 当前会话固定为工作模式
-- `/persona set rest` 当前会话固定为休息模式
-- `/persona set auto` 清除手动覆盖，回到配置判定
+- `/mode status` 查看当前模式与会话标识
+- `/mode set work` 当前会话固定为工作模式
+- `/mode set rest` 当前会话固定为休息模式
+- `/mode set auto` 清除手动覆盖，回到配置判定
 
 ## 配置项（WebUI）
 
@@ -96,12 +96,12 @@
 
 1. 在 mnemosyne 里执行 `/memory init`
 2. 用 `/memory get_session_id` 确认会话 ID
-3. 在本插件执行 `/persona status`，确认模式与会话标识
+3. 在本插件执行 `/mode status`，确认模式与会话标识
 
 ## 本地测试建议
 
-1. 先把 `work_time_windows` 设成当前时间命中的区间，再执行 `/persona status`，确认返回 `mode: work (time)`。
-2. 再改成不命中当前时间的区间，执行 `/persona status`，确认返回 `mode: rest (time)`。
-3. 执行 `/persona set work`，确认返回覆盖生效，并再次 `/persona status` 显示 `override`。
-4. 执行 `/persona set auto` 清除覆盖，确认回到时间判定。
+1. 先把 `work_time_windows` 设成当前时间命中的区间，再执行 `/mode status`，确认返回 `mode: work (time)`。
+2. 再改成不命中当前时间的区间，执行 `/mode status`，确认返回 `mode: rest (time)`。
+3. 执行 `/mode set work`，确认返回覆盖生效，并再次 `/mode status` 显示 `override`。
+4. 执行 `/mode set auto` 清除覆盖，确认回到时间判定。
 5. 连续在 work/rest 两种模式对话，观察上下文隔离是否生效，同时记忆召回仍由 mnemosyne 统一提供。

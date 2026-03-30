@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.1")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.2")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -62,10 +62,10 @@ class CharacterSplitPlugin(Star):
     async def terminate(self):
         await self._state_store.save_state()
 
-    @filter.command("persona")
-    async def persona(self, event: Any):
-        """Manage mode split behavior. Usage: /persona help"""
-        args = self._parse_persona_args(getattr(event, "message_str", ""))
+    @filter.command("mode")
+    async def mode(self, event: Any):
+        """Manage mode split behavior. Usage: /mode help"""
+        args = self._parse_mode_args(getattr(event, "message_str", ""))
         if not args:
             yield event.plain_result(self._help_text())
             return
@@ -92,7 +92,7 @@ class CharacterSplitPlugin(Star):
 
         if action == "set":
             if len(args) < 2:
-                yield event.plain_result("Usage: /persona set work|rest|auto")
+                yield event.plain_result("Usage: /mode set work|rest|auto")
                 return
 
             target = args[1].lower()
@@ -108,7 +108,7 @@ class CharacterSplitPlugin(Star):
                 return
 
             if target not in MODE_SET:
-                yield event.plain_result("Usage: /persona set work|rest|auto")
+                yield event.plain_result("Usage: /mode set work|rest|auto")
                 return
 
             self._state_store.set_session_override(key, target)
@@ -142,13 +142,13 @@ class CharacterSplitPlugin(Star):
             put_kv_data_func=getattr(self, "put_kv_data", None),
         )
 
-    def _parse_persona_args(self, message_str: str) -> List[str]:
+    def _parse_mode_args(self, message_str: str) -> List[str]:
         tokens = (message_str or "").strip().split()
         if not tokens:
             return []
 
         head = tokens[0].lstrip("/").lower()
-        if head == "persona":
+        if head == "mode":
             return tokens[1:]
         return tokens
 
@@ -163,6 +163,6 @@ class CharacterSplitPlugin(Star):
     def _help_text(self) -> str:
         return (
             "Character Split Commands:\n"
-            "/persona status\n"
-            "/persona set work|rest|auto"
+            "/mode status\n"
+            "/mode set work|rest|auto"
         )

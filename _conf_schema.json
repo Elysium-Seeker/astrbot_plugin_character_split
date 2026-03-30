@@ -1,0 +1,53 @@
+{
+  "time_mode_enabled": {
+    "description": "是否启用按时间判定模式（建议开启）",
+    "type": "bool",
+    "default": true
+  },
+  "timezone_offset_hours": {
+    "description": "时区偏移（相对 UTC，例：8 表示 UTC+8）",
+    "type": "int",
+    "default": 8
+  },
+  "work_days": {
+    "description": "工作日（1-7，1=周一，7=周日，逗号分隔）",
+    "type": "string",
+    "default": "1,2,3,4,5"
+  },
+  "work_time_windows": {
+    "description": "工作时间窗，支持多个区间，格式 09:00-12:00,13:30-18:00",
+    "type": "text",
+    "default": "09:00-18:00"
+  },
+  "default_mode": {
+    "description": "默认模式（当时间规则和会话白名单都未命中时生效）",
+    "type": "string",
+    "default": "rest",
+    "options": ["work", "rest"]
+  },
+  "work_sessions": {
+    "description": "工作模式会话白名单（时间规则之后的补充分流）",
+    "type": "text",
+    "default": ""
+  },
+  "rest_sessions": {
+    "description": "休息模式会话白名单（时间规则之后的补充分流）",
+    "type": "text",
+    "default": ""
+  },
+  "core_persona_prompt": {
+    "description": "同一人格核心设定（work/rest 共用）",
+    "type": "text",
+    "default": "You are the same person in both work and rest modes. Keep the same values, memory continuity and identity across modes."
+  },
+  "work_persona_prompt": {
+    "description": "工作模式增强提示词（偏工作能力）",
+    "type": "text",
+    "default": "WORK augmentation: keep responses concise and structured. Strengthen capability in task decomposition, priority planning, risk spotting, decision framing and practical execution suggestions."
+  },
+  "rest_persona_prompt": {
+    "description": "休息模式增强提示词（偏人性化体验）",
+    "type": "text",
+    "default": "REST augmentation: keep responses warm, empathetic and humanized while staying truthful. Use a relaxed conversational tone and include emotional support when appropriate."
+  }
+}

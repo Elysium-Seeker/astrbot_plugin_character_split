@@ -1,0 +1,89 @@
+# astrbot_plugin_character_split
+
+工作/休息人格分流插件（时间驱动模式）。
+
+定位很单一：
+
+- 只负责把同一会话分成 work / rest 两条对话上下文
+- 只负责注入“同一人格核心 + 模式增强”提示词
+- 不负责长期记忆写入或检索
+
+长期记忆统一由 `astrbot_plugin_mnemosyne` 处理。
+
+## 实际行为
+
+1. 对话分流
+- 每次 `on_llm_request` 先判定模式（work/rest），再切到对应 conversation。
+- 同一会话会维护两条独立对话：`work` 和 `rest`。
+
+2. 模式判定（默认按时间）
+- 判定优先级：手动覆盖 > 时间规则 > 会话白名单 > default_mode。
+- 时间规则由工作日 + 工作时间窗决定，默认 `周一到周五` + `09:00-18:00`。
+- 不在工作日或工作时间窗内时，自动进入 rest。
+
+3. 人格差异（同一人设）
+- `core_persona_prompt`：定义“同一个人”的核心身份与价值观（work/rest 共用）。
+- work 增强：偏任务分解、优先级、风险识别、执行建议。
+- rest 增强：偏人性化表达、情绪支持、轻松交流。
+- 两侧能力和语气有差异，但身份连续。
+
+4. 记忆后端
+- 本插件不维护本地长期记忆。
+- 推荐并默认与 mnemosyne 搭配，记忆统一由 mnemosyne 注入。
+
+## 指令
+
+- `/persona status` 查看当前模式与会话标识
+- `/persona set work` 当前会话固定为工作模式
+- `/persona set rest` 当前会话固定为休息模式
+- `/persona set auto` 清除手动覆盖，回到配置判定
+
+## 配置项（WebUI）
+
+- `time_mode_enabled`: 是否启用时间判定（默认 true）
+- `timezone_offset_hours`: 时区偏移（默认 8）
+- `work_days`: 工作日（1=周一，7=周日，默认 `1,2,3,4,5`）
+- `work_time_windows`: 工作时间窗（支持多个区间，默认 `09:00-18:00`）
+- `default_mode`: 兜底模式（时间规则和白名单都未命中时）
+- `work_sessions`: 工作模式白名单（时间规则之后的补充分流）
+- `rest_sessions`: 休息模式白名单（时间规则之后的补充分流）
+- `core_persona_prompt`: 同一人格核心设定
+- `work_persona_prompt`: 工作模式增强提示词
+- `rest_persona_prompt`: 休息模式增强提示词
+
+## 时间配置示例
+
+1. 标准上班时段
+- `work_days = 1,2,3,4,5`
+- `work_time_windows = 09:00-18:00`
+
+2. 午休拆分
+- `work_time_windows = 09:00-12:00,13:30-18:00`
+
+3. 夜班（跨天）
+- `work_time_windows = 22:00-02:00`
+
+## 与 mnemosyne 推荐联动
+
+推荐参数：
+
+1. 共享 work/rest 记忆池
+- `use_personality_filtering = false`
+
+2. 会话隔离
+- `use_session_filtering = true`
+
+3. 群聊防串线（可选）
+- `use_participant_filtering = true`
+
+4. 注入方式
+- `memory_injection_method = user_prompt`
+
+5. 召回数量
+- `top_k = 3~5`
+
+## 使用检查清单
+
+1. 在 mnemosyne 里执行 `/memory init`
+2. 用 `/memory get_session_id` 确认会话 ID
+3. 在本插件执行 `/persona status`，确认模式与会话标识

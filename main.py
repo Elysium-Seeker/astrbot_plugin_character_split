@@ -118,14 +118,34 @@ class CharacterSplitPlugin(Star):
         yield event.plain_result(msg)
 
     @filter.on_llm_request(
-        priority=10,
+        priority=100,
         desc="拦截 LLM 请求前置钩子：根据时间和用户配置判定工作状况并剥离上下文及注入增量提示词",
     )
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         try:
             session_id, umo = self._get_session_identifiers(event)
             mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
-            await self._sync_mode_conversation(event, mode, umo)
+            switched = await self._sync_mode_conversation(event, mode, umo)
+
+            if switched:
+                conv_mgr = await self._get_conversation_manager()
+                if conv_mgr:
+                    import json
+                    import asyncio
+                    try:
+                        new_cid = await self._conversation_splitter._call_conversation_method(
+                            conv_mgr.get_curr_conversation_id, umo, timeout_seconds=4.0
+                        )
+                        if new_cid:
+                            new_conv = await self._conversation_splitter._call_conversation_method(
+                                conv_mgr.get_conversation, umo, new_cid, timeout_seconds=4.0
+                            )
+                            if new_conv:
+                                req.conversation = getattr(new_conv, "inner", new_conv)
+                                if hasattr(req.conversation, "history"):
+                                    req.contexts = json.loads(req.conversation.history)
+                    except Exception as e:
+                        logger.warning(f"character_split failed to sync req context: {e}")
 
             await self._mark_mode_dirty(umo, mode)
             self._inject_mode_prompt(req, mode)
@@ -133,14 +153,14 @@ class CharacterSplitPlugin(Star):
             logger.exception("character_split on_llm_request failed")
             raise
 
-    async def _sync_mode_conversation(self, event: AstrMessageEvent, mode: str, umo: str):
+    async def _sync_mode_conversation(self, event: AstrMessageEvent, mode: str, umo: str) -> bool:
         mnemosyne_available = await self._is_mnemosyne_available()
         require_backend = self._split_config.get_bool("require_mnemosyne_for_split", True)
         source_mode = await self._get_current_mode_from_conversation(umo)
 
         if not (mnemosyne_available or not require_backend):
             await self._warn_missing_mnemosyne_once()
-            return
+            return False
 
         pre_switch_hook = await self._build_pre_switch_hook(event, umo, source_mode) if mnemosyne_available else None
         switched = await self._conversation_splitter.ensure_mode_conversation(
@@ -151,6 +171,8 @@ class CharacterSplitPlugin(Star):
         )
         if switched and mnemosyne_available:
             await self._trigger_mnemosyne_recall(event, mode)
+        
+        return switched
 
     def _inject_mode_prompt(self, req: ProviderRequest, mode: str):
         persona_prompt = self._persona_builder.build(mode)

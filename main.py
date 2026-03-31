@@ -137,7 +137,8 @@ class CharacterSplitPlugin(Star):
             
         output = f"[{mode}] 下的近期记忆:\n"
         for idx, m in enumerate(memories, 1):
-            output += f"{m['id']}. {m['title']} : {m['content']} ({m['timestamp']})\n"
+            imp = m.get('importance', 5)
+            output += f"{m['id']}. [⭐{imp}] {m['title']} : {m['content']} ({m['timestamp']})\n"
         yield event.plain_result(output)
 
     @csmem.command("rm", desc="删除指定ID的记忆事实")

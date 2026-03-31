@@ -34,7 +34,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.api.star import StarTools
 
-@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.8")
+@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.9")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -191,14 +191,20 @@ class CharacterSplitPlugin(Star):
             except Exception as e:
                 logger.warning(f"character_split failed to get history for sync: {e}")
 
-        if not history or len(history) < 2:
-            yield event.plain_result(f"当前模式 [{mode}] 对话历史过短，暂无需提取记忆。")
+        if not history:
+            yield event.plain_result(f"当前模式 [{mode}] 暂无可提取的历史内容。")
             return
 
-        yield event.plain_result(f"⏳ 正在后台提取当前模式 [{mode}] 的三层记忆...")
+        yield event.plain_result(f"⏳ 正在后台提取当前模式 [{mode}] 的三层记忆（全量历史）...")
         import asyncio
         asyncio.create_task(
-            self._memory_manager.trigger_summary_and_save(self.context, umo, mode, history)
+            self._memory_manager.trigger_summary_and_save(
+                self.context,
+                umo,
+                mode,
+                history,
+                history_limit=None,
+            )
         )
     @filter.on_llm_request(
         priority=100,

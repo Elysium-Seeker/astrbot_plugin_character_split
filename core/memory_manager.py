@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import sqlite3
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 SCOPE_GLOBAL = "global"
 SCOPE_MODE = "mode"
@@ -253,9 +253,18 @@ class MemoryManager:
         return cleaned.strip()
 
     @staticmethod
-    def _build_history_text(history_contexts: List[Dict[str, Any]]) -> str:
+    def _build_history_text(
+        history_contexts: List[Dict[str, Any]],
+        history_limit: Optional[int] = 40,
+    ) -> str:
+        if history_limit is None:
+            source = history_contexts
+        else:
+            safe_limit = max(1, int(history_limit))
+            source = history_contexts[-safe_limit:]
+
         parts: List[str] = []
-        for msg in history_contexts[-40:]:
+        for msg in source:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if isinstance(content, str) and content.strip():
@@ -300,8 +309,9 @@ class MemoryManager:
         umo: str,
         mode: str,
         history_contexts: List[Dict[str, Any]],
+        history_limit: Optional[int] = 40,
     ):
-        if not history_contexts or len(history_contexts) < 2:
+        if not history_contexts:
             return
 
         try:
@@ -320,7 +330,9 @@ class MemoryManager:
                 "数组元素格式：{\"scope\":\"global\",\"title\":\"...\",\"content\":\"...\",\"importance\":8}"
             )
 
-            history_text = self._build_history_text(history_contexts)
+            history_text = self._build_history_text(history_contexts, history_limit)
+            if not history_text:
+                return
             response = await context.llm_generate(
                 chat_provider_id=provider_id,
                 system_prompt=system_prompt,

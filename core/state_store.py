@@ -1,6 +1,7 @@
 # pyright: reportMissingImports=false
 
 import asyncio
+import inspect
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -52,7 +53,7 @@ class StateStore:
 
         if self._put_kv_data_func is not None:
             try:
-                await self._put_kv_data_func(self._state_kv_key, state_snapshot)
+                await self._call_maybe_async(self._put_kv_data_func, self._state_kv_key, state_snapshot)
             except Exception as exc:
                 self._logger.warning(f"save kv state failed: {exc}")
 
@@ -65,51 +66,57 @@ class StateStore:
         except Exception as exc:
             self._logger.warning(f"save file state failed: {exc}")
 
-    def get_session_override(self, key: str) -> Optional[str]:
-        if not self._state or not key:
+    async def get_session_override(self, key: str) -> Optional[str]:
+        async with self._state_lock:
+            if not self._state or not key:
+                return None
+            value = self._state["session_overrides"].get(key)
+            if isinstance(value, str):
+                return value
             return None
-        value = self._state["session_overrides"].get(key)
-        if isinstance(value, str):
-            return value
-        return None
 
-    def set_session_override(self, key: str, mode: str):
-        if not self._state or not key:
-            return
-        self._state["session_overrides"][key] = mode
+    async def set_session_override(self, key: str, mode: str):
+        async with self._state_lock:
+            if not self._state or not key:
+                return
+            self._state["session_overrides"][key] = mode
 
-    def clear_session_override(self, key: str):
-        if not self._state or not key:
-            return
-        self._state["session_overrides"].pop(key, None)
+    async def clear_session_override(self, key: str):
+        async with self._state_lock:
+            if not self._state or not key:
+                return
+            self._state["session_overrides"].pop(key, None)
 
-    def get_mode_conversation_id(self, umo: str, mode: str) -> Optional[str]:
-        if not self._state or not umo:
+    async def get_mode_conversation_id(self, umo: str, mode: str) -> Optional[str]:
+        async with self._state_lock:
+            if not self._state or not umo:
+                return None
+            session_map = self._state["session_conversations"].get(umo, {})
+            value = session_map.get(mode)
+            if isinstance(value, str):
+                return value
             return None
-        session_map = self._state["session_conversations"].get(umo, {})
-        value = session_map.get(mode)
-        if isinstance(value, str):
-            return value
-        return None
 
-    def set_mode_conversation_id(self, umo: str, mode: str, conversation_id: str):
-        if not self._state or not umo:
-            return
-        session_map = self._state["session_conversations"].setdefault(umo, {})
-        session_map[mode] = conversation_id
+    async def set_mode_conversation_id(self, umo: str, mode: str, conversation_id: str):
+        async with self._state_lock:
+            if not self._state or not umo:
+                return
+            session_map = self._state["session_conversations"].setdefault(umo, {})
+            session_map[mode] = conversation_id
 
-    def remove_mode_conversation_id(self, umo: str, mode: str):
-        if not self._state or not umo:
-            return
-        session_map = self._state["session_conversations"].setdefault(umo, {})
-        session_map.pop(mode, None)
+    async def remove_mode_conversation_id(self, umo: str, mode: str):
+        async with self._state_lock:
+            if not self._state or not umo:
+                return
+            session_map = self._state["session_conversations"].setdefault(umo, {})
+            session_map.pop(mode, None)
 
     async def _load_state_from_kv(self) -> Optional[Dict[str, Any]]:
         if self._get_kv_data_func is None:
             return None
 
         try:
-            data = await self._get_kv_data_func(self._state_kv_key, None)
+            data = await self._call_maybe_async(self._get_kv_data_func, self._state_kv_key, None)
             if isinstance(data, dict):
                 return data
         except Exception as exc:
@@ -147,10 +154,7 @@ class StateStore:
                 self._logger.warning(f"resolve data dir from get_data_path_func failed: {exc}")
 
         if base is None:
-            base = Path.home() / ".astrbot" / "plugin_data" / self._plugin_name
-            self._logger.warning(
-                "StarTools is unavailable; using fallback data path under user home directory."
-            )
+            raise RuntimeError("unable to resolve plugin data dir from StarTools/get_data_path_func")
 
         base.mkdir(parents=True, exist_ok=True)
         return base / "state.json"
@@ -171,3 +175,9 @@ class StateStore:
             "session_overrides": {},
             "session_conversations": {},
         }
+
+    async def _call_maybe_async(self, func: Any, *args: Any) -> Any:
+        result = func(*args)
+        if inspect.isawaitable(result):
+            return await result
+        return result

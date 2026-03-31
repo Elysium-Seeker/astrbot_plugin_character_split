@@ -17,7 +17,7 @@ class ModeResolver:
         # Priority is intentionally schedule-first after manual override.
         # Current order: override > time > config list > default.
         for key in (session_id, umo):
-            override = self._state_store.get_session_override(key)
+            override = await self._state_store.get_session_override(key)
             if key and override in MODE_SET:
                 return override, "override"
 

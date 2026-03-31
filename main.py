@@ -27,32 +27,10 @@ except ImportError:  # pragma: no cover
         StateStore,
     )
 
-try:
-    from astrbot.api import logger
-    from astrbot.api.event import AstrMessageEvent, filter
-    from astrbot.api.provider import ProviderRequest
-    from astrbot.api.star import Context, Star, register
-except ImportError:  # pragma: no cover
-    try:
-        from .runtime import (  # type: ignore
-            AstrMessageEvent,
-            Context,
-            ProviderRequest,
-            Star,
-            filter,
-            logger,
-            register,
-        )
-    except ImportError:  # pragma: no cover
-        from runtime import (  # type: ignore
-            AstrMessageEvent,
-            Context,
-            ProviderRequest,
-            Star,
-            filter,
-            logger,
-            register,
-        )
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
+from astrbot.api.star import Context, Star, register
 
 @register("character_split", "Elysium-Seeker", "Split work/rest dialog for mnemosyne memory backend", "1.0.1")
 class CharacterSplitPlugin(Star):
@@ -144,32 +122,37 @@ class CharacterSplitPlugin(Star):
         try:
             session_id, umo = self._get_session_identifiers(event)
             mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
-            mnemosyne_available = await self._is_mnemosyne_available()
-            require_backend = self._split_config.get_bool("require_mnemosyne_for_split", True)
-            source_mode = await self._get_current_mode_from_conversation(umo)
-
-            if mnemosyne_available or not require_backend:
-                pre_switch_hook = await self._build_pre_switch_hook(event, umo, source_mode) if mnemosyne_available else None
-                switched = await self._conversation_splitter.ensure_mode_conversation(
-                    self.context,
-                    event,
-                    mode,
-                    pre_switch_hook=pre_switch_hook,
-                )
-                if switched and mnemosyne_available:
-                    await self._trigger_mnemosyne_recall(event, mode)
-            else:
-                await self._warn_missing_mnemosyne_once()
+            await self._sync_mode_conversation(event, mode, umo)
 
             await self._mark_mode_dirty(umo, mode)
-
-            persona_prompt = self._persona_builder.build(mode)
-            old_prompt = getattr(req, "system_prompt", "") or ""
-            merged = (old_prompt.strip() + "\n\n" + f"[Mode]\nCurrent mode: {mode}\n{persona_prompt}").strip()
-            req.system_prompt = merged
+            self._inject_mode_prompt(req, mode)
         except Exception:
             logger.exception("character_split on_llm_request failed")
             raise
+
+    async def _sync_mode_conversation(self, event: AstrMessageEvent, mode: str, umo: str):
+        mnemosyne_available = await self._is_mnemosyne_available()
+        require_backend = self._split_config.get_bool("require_mnemosyne_for_split", True)
+        source_mode = await self._get_current_mode_from_conversation(umo)
+
+        if not (mnemosyne_available or not require_backend):
+            await self._warn_missing_mnemosyne_once()
+            return
+
+        pre_switch_hook = await self._build_pre_switch_hook(event, umo, source_mode) if mnemosyne_available else None
+        switched = await self._conversation_splitter.ensure_mode_conversation(
+            self.context,
+            event,
+            mode,
+            pre_switch_hook=pre_switch_hook,
+        )
+        if switched and mnemosyne_available:
+            await self._trigger_mnemosyne_recall(event, mode)
+
+    def _inject_mode_prompt(self, req: ProviderRequest, mode: str):
+        persona_prompt = self._persona_builder.build(mode)
+        old_prompt = getattr(req, "system_prompt", "") or ""
+        req.system_prompt = (old_prompt.strip() + "\n\n" + f"[Mode]\nCurrent mode: {mode}\n{persona_prompt}").strip()
 
     async def _get_loaded_stars(self) -> List[Any]:
         get_all_stars = getattr(self.context, "get_all_stars", None)
@@ -251,13 +234,24 @@ class CharacterSplitPlugin(Star):
             return None
 
         await self._state_store.ensure_state()
-        work_cid = self._state_store.get_mode_conversation_id(umo, "work")
-        rest_cid = self._state_store.get_mode_conversation_id(umo, "rest")
+        work_cid = await self._state_store.get_mode_conversation_id(umo, "work")
+        rest_cid = await self._state_store.get_mode_conversation_id(umo, "rest")
         if curr_cid == work_cid:
             return "work"
         if curr_cid == rest_cid:
             return "rest"
         return None
+
+    def _supports_call(self, method: Any, args: Tuple[Any, ...]) -> bool:
+        try:
+            signature = inspect.signature(method)
+            signature.bind(*args)
+            return True
+        except TypeError:
+            return False
+        except ValueError:
+            # Some C-extension/built-in callables may not expose a full signature.
+            return True
 
     async def _build_pre_switch_hook(self, event: Any, umo: str, source_mode: Optional[str]):
         if source_mode not in MODE_SET:
@@ -328,14 +322,14 @@ class CharacterSplitPlugin(Star):
                         continue
 
                     for args in ((event,), tuple()):
+                        if not self._supports_call(method, args):
+                            continue
                         try:
                             await self._invoke_candidate_method(method, args)
                             logger.info(
                                 f"character_split mnemosyne checkpoint via {method_name} succeeded"
                             )
                             return True
-                        except TypeError:
-                            continue
                         except asyncio.TimeoutError:
                             logger.warning(
                                 f"character_split mnemosyne checkpoint via {method_name} timed out"
@@ -394,6 +388,8 @@ class CharacterSplitPlugin(Star):
                         continue
 
                     for args in ((event, mode), (event,), (mode,), tuple()):
+                        if not self._supports_call(method, args):
+                            continue
                         try:
                             await self._invoke_candidate_method(method, args)
                             async with self._runtime_state_lock:
@@ -402,8 +398,6 @@ class CharacterSplitPlugin(Star):
                                 f"character_split mnemosyne recall via {method_name} succeeded"
                             )
                             return
-                        except TypeError:
-                            continue
                         except asyncio.TimeoutError:
                             logger.warning(
                                 f"character_split mnemosyne recall via {method_name} timed out"
@@ -428,6 +422,7 @@ class CharacterSplitPlugin(Star):
             plugin_name=str(getattr(self, "name", PLUGIN_NAME) or PLUGIN_NAME),
             state_kv_key=STATE_KV_KEY,
             logger=logger,
+            get_data_path_func=getattr(self, "get_data_path", None),
             get_kv_data_func=getattr(self, "get_kv_data", None),
             put_kv_data_func=getattr(self, "put_kv_data", None),
         )
@@ -440,14 +435,14 @@ class CharacterSplitPlugin(Star):
 
         await self._state_store.ensure_state()
         if target == "auto":
-            self._state_store.clear_session_override(key)
+            await self._state_store.clear_session_override(key)
             await self._state_store.save_state()
             return "Session mode override cleared."
 
         if target not in MODE_SET:
             return "Usage: /mode set work|rest|auto"
 
-        self._state_store.set_session_override(key, target)
+        await self._state_store.set_session_override(key, target)
         await self._state_store.save_state()
         return f"Session override set to: {target}"
 

@@ -149,7 +149,10 @@ class StateStore:
             try:
                 raw_base = self._get_data_path_func()
                 base_root = raw_base if isinstance(raw_base, Path) else Path(str(raw_base))
-                base = base_root / "plugin_data" / self._plugin_name
+                if "plugin_data" in base_root.parts:
+                    base = base_root / self._plugin_name
+                else:
+                    base = base_root / "plugin_data" / self._plugin_name
             except Exception as exc:
                 self._logger.warning(f"resolve data dir from get_data_path_func failed: {exc}")
 
@@ -177,7 +180,10 @@ class StateStore:
         }
 
     async def _call_maybe_async(self, func: Any, *args: Any) -> Any:
-        result = func(*args)
+        if inspect.iscoroutinefunction(func):
+            return await func(*args)
+
+        result = await asyncio.to_thread(func, *args)
         if inspect.isawaitable(result):
             return await result
         return result

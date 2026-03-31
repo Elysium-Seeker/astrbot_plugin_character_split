@@ -120,8 +120,8 @@ class ConversationSplitter:
                 )
                 if isinstance(result, str):
                     return result
-                self._logger.error("new_conversation returned unexpected result type")
-                return None
+                self._logger.warning("new_conversation returned unexpected result type, continuing")
+                continue
             except asyncio.TimeoutError:
                 self._logger.error("new_conversation timed out")
                 return None

@@ -200,6 +200,8 @@ class CharacterSplitPlugin(Star):
         if not umo or mode not in MODE_SET:
             return
         async with self._runtime_state_lock:
+            if len(self._mode_dirty_runtime) > 2000:
+                self._mode_dirty_runtime.clear()
             state = self._mode_dirty_runtime.setdefault(umo, {})
             state[mode] = True
 
@@ -271,7 +273,7 @@ class CharacterSplitPlugin(Star):
         if success:
             await self._clear_mode_dirty(umo, source_mode)
 
-    async def _invoke_candidate_method(self, method: Any, args: Tuple[Any, ...], timeout_seconds: float = 8.0):
+    async def _invoke_candidate_method(self, method: Any, args: Tuple[Any, ...], timeout_seconds: float = 3.0):
         if inspect.iscoroutinefunction(method):
             await asyncio.wait_for(method(*args), timeout=timeout_seconds)
             return
@@ -334,12 +336,12 @@ class CharacterSplitPlugin(Star):
                             logger.warning(
                                 f"character_split mnemosyne checkpoint via {method_name} timed out"
                             )
-                            break
+                            continue
                         except Exception as exc:
                             logger.warning(
                                 f"character_split mnemosyne checkpoint via {method_name} failed: {exc}"
                             )
-                            break
+                            continue
         return False
 
     async def _trigger_mnemosyne_recall(self, event: Any, mode: str):
@@ -402,12 +404,12 @@ class CharacterSplitPlugin(Star):
                             logger.warning(
                                 f"character_split mnemosyne recall via {method_name} timed out"
                             )
-                            break
+                            continue
                         except Exception as exc:
                             logger.warning(
                                 f"character_split mnemosyne recall via {method_name} failed: {exc}"
                             )
-                            break
+                            continue
 
         async with self._runtime_state_lock:
             if not self._warned_missing_mnemosyne_recall:

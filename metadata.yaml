@@ -1,7 +1,7 @@
-name: astrbot_plugin_character_split
-display_name: WorkRest Character Split
-desc: 工作/休息双模式分离对话，共享长期记忆的智能人格切换插件
-version: v1.1.4
+﻿name: astrbot_plugin_character_split
+display_name: 人格与记忆多开 (Character Split)
+desc: 按时间对群聊私聊拆分工作与休息轨道，自带三层记忆系统，不串台的智能人格插件。
+version: v1.1.5
 author: Elysium
-repo: https://github.com/yourname/astrbot_plugin_character_split
+repo: https://github.com/Elysium-Seeker/astrbot_plugin_character_split
 astrbot_version: ">=4.9.2,<5"

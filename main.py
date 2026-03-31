@@ -34,7 +34,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.api.star import StarTools
 
-@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.4")
+@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.5")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -65,12 +65,12 @@ class CharacterSplitPlugin(Star):
     def mode(self):
         """Mode command group"""
 
-    @mode.command("help", desc="查看 mode 指令帮助面板")
+    @mode.command("help", desc="看指令帮助")
     async def mode_help(self, event: AstrMessageEvent):
         """Show mode command help"""
         yield event.plain_result(self._help_text())
 
-    @mode.command("status", desc="查询当前生效模式及触发来源")
+    @mode.command("status", desc="看看当前是工作还是休息，以及为什么这么判")
     async def mode_status(self, event: AstrMessageEvent):
         """Show current mode status"""
         session_id, umo = self._get_session_identifiers(event)
@@ -88,25 +88,25 @@ class CharacterSplitPlugin(Star):
         )
         yield event.plain_result(text)
 
-    @mode.command("work", desc="锁定当前会话为工作模式")
+    @mode.command("work", desc="强制当前聊天立马切成工作模式")
     async def mode_work(self, event: AstrMessageEvent):
         """Force work mode for current session"""
         msg = await self._set_mode_override(event, "work")
         yield event.plain_result(msg)
 
-    @mode.command("rest", desc="锁定当前会话为休息模式")
+    @mode.command("rest", desc="强制切成休息模式")
     async def mode_rest(self, event: AstrMessageEvent):
         """Force rest mode for current session"""
         msg = await self._set_mode_override(event, "rest")
         yield event.plain_result(msg)
 
-    @mode.command("auto", desc="解除强制锁定，恢复时间规则自动调度")
+    @mode.command("auto", desc="取消锁定恢复顺其自然（按时间切）")
     async def mode_auto(self, event: AstrMessageEvent):
         """Reset to auto mode resolution"""
         msg = await self._set_mode_override(event, "auto")
         yield event.plain_result(msg)
 
-    @mode.command("set", desc="兼容旧版：参数填 work/rest/auto 快速锁定模式")
+    @mode.command("set", desc="兼容旧指令写法")
     async def mode_set(self, event: AstrMessageEvent, target: str = ""):
         """Compatibility command for /mode set work|rest|auto"""
         target = (target or "").strip().lower()
@@ -117,11 +117,11 @@ class CharacterSplitPlugin(Star):
         msg = await self._set_mode_override(event, target)
         yield event.plain_result(msg)
 
-    @filter.command_group("csmem", desc="独立多角色记忆管理系统")
+    @filter.command_group("csmem", desc="独立三层记忆管理系统")
     def csmem(self):
         """Memory management group"""
 
-    @csmem.command("list", desc="按三层结构列出当前可用记忆")
+    @csmem.command("list", desc="翻一翻当前环境的三层记忆池里都记了啥")
     async def mem_list(self, event: AstrMessageEvent):
         """List current memories grouped by memory layer"""
         session_id, umo = self._get_session_identifiers(event)
@@ -158,7 +158,7 @@ class CharacterSplitPlugin(Star):
 
         yield event.plain_result("\n".join(output))
 
-    @csmem.command("rm", desc="删除指定ID的记忆事实")
+    @csmem.command("rm", desc="记错了？抄下 list 里的 ID 给删了")
     async def mem_rm(self, event: AstrMessageEvent, mem_id: int):
         """Remove a specific memory by ID"""
         session_id, umo = self._get_session_identifiers(event)
@@ -166,8 +166,9 @@ class CharacterSplitPlugin(Star):
         if success:
             yield event.plain_result(f"已删除记录 #{mem_id}")
         else:
-            yield event.plain_result(f"删除失败：未找到从属于你的记录 #{mem_id}")
-    @csmem.command("sync", desc="对当前会话历史立即进行记忆总结与提取")
+            yield event.plain_result(f"删除失败：没找到这条记录 #{mem_id}")
+            
+    @csmem.command("sync", desc="觉得 Bot 脑子没跟上？立马把刚刚聊的总结存起来")
     async def mem_sync(self, event: AstrMessageEvent):
         """Force run background memory summarization for current conversation"""
         session_id, umo = self._get_session_identifiers(event)
@@ -390,14 +391,14 @@ class CharacterSplitPlugin(Star):
         return (
             "Character Split Commands:\n"
             "----- 模式控制 -----\n"
-            "/mode help - 帮助面板\n"
-            "/mode status - 当前状态及记忆数\n"
-            "/mode work - 锁定为工作模式\n"
-            "/mode rest - 锁定为休息模式\n"
-            "/mode auto - 解除锁定恢复自动\n"
-            "/mode set work|rest|auto\n"
+            "/mode help - 看指令帮助\n"
+            "/mode status - 当前是工作还是休息，为什么这么判\n"
+            "/mode work - 强制当前聊天立马切成工作模式\n"
+            "/mode rest - 强制切成休息模式\n"
+            "/mode auto - 取消锁定恢复顺其自然\n"
+            "/mode set [work|rest|auto] - 兼容旧写法\n"
             "----- 记忆管理 -----\n"
-            "/csmem list - 查看三层记忆\n"
-            "/csmem rm <id> - 删除指定记忆\n"
-            "/csmem sync - 手动触发三层记忆提取\n"
+            "/csmem list - 翻一翻当前的三层记忆池\n"
+            "/csmem rm <id> - 记错了？抄下 list 里的 ID 删了\n"
+            "/csmem sync - 觉得脑子跟不上？赶紧敲一锤立刻总结\n"
         )

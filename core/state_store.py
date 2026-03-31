@@ -141,31 +141,49 @@ class StateStore:
         return self._default_state()
 
     async def _state_file_path(self) -> Path:
-        base: Optional[Path] = None
+        candidates = []
         if StarTools is not None:
-            try:
-                base = Path(str(StarTools.get_data_dir()))
-            except Exception as exc:
-                self._logger.warning(f"resolve data dir from StarTools failed: {exc}")
+            for name in ("get_data_dir", "get_data_path", "get_astrbot_data_path"):
+                candidate = getattr(StarTools, name, None)
+                if callable(candidate):
+                    candidates.append(candidate)
 
-        if base is None and self._get_data_path_func is not None:
+        if self._get_data_path_func is not None:
+            candidates.append(self._get_data_path_func)
+
+        for candidate in candidates:
             try:
-                raw_base = await self._call_maybe_async(self._get_data_path_func)
+                raw_base = await self._call_maybe_async(candidate)
+                if raw_base is None:
+                    continue
                 base_root = raw_base if isinstance(raw_base, Path) else Path(str(raw_base))
-                if base_root.name == self._plugin_name:
-                    base = base_root
-                elif "plugin_data" in base_root.parts:
-                    base = base_root / self._plugin_name
-                else:
-                    base = base_root / "plugin_data" / self._plugin_name
+                base = self._normalize_plugin_data_dir(base_root)
+                base.mkdir(parents=True, exist_ok=True)
+                return base / "state.json"
             except Exception as exc:
-                self._logger.warning(f"resolve data dir from get_data_path_func failed: {exc}")
+                candidate_name = getattr(candidate, "__name__", repr(candidate))
+                self._logger.warning(f"resolve data dir via {candidate_name} failed: {exc}")
 
-        if base is None:
-            raise RuntimeError("unable to resolve plugin data dir from StarTools/get_data_path_func")
+        # Last-resort fallback for environments where StarTools path helpers are unavailable.
+        fallback = Path.cwd() / "data" / "plugin_data" / self._plugin_name
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+            self._logger.warning(f"fallback to cwd plugin data dir: {fallback}")
+            return fallback / "state.json"
+        except Exception as exc:
+            raise RuntimeError("unable to resolve plugin data dir from StarTools/get_data_path_func") from exc
 
-        base.mkdir(parents=True, exist_ok=True)
-        return base / "state.json"
+    def _normalize_plugin_data_dir(self, base_root: Path) -> Path:
+        if base_root.name == self._plugin_name:
+            return base_root
+        if base_root.name == "plugin_data":
+            return base_root / self._plugin_name
+        if "plugin_data" in base_root.parts:
+            plugin_data_index = base_root.parts.index("plugin_data") + 1
+            if plugin_data_index < len(base_root.parts) and base_root.parts[plugin_data_index] == self._plugin_name:
+                return base_root
+            return base_root / self._plugin_name
+        return base_root / "plugin_data" / self._plugin_name
 
     def _normalize_state(self, raw: Any) -> Dict[str, Any]:
         base = self._default_state()
@@ -188,7 +206,7 @@ class StateStore:
         if inspect.iscoroutinefunction(func):
             return await func(*args)
 
-        result = await asyncio.to_thread(func, *args)
+        result = func(*args)
         if inspect.isawaitable(result):
             return await result
         return result

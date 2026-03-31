@@ -34,7 +34,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.api.star import StarTools
 
-@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.7")
+@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.8")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -342,8 +342,8 @@ class CharacterSplitPlugin(Star):
             return None
 
         await self._state_store.ensure_state()
-        work_cid = self._state_store.get_mode_conversation_id(umo, "work")
-        rest_cid = self._state_store.get_mode_conversation_id(umo, "rest")
+        work_cid = await self._state_store.get_mode_conversation_id(umo, "work")
+        rest_cid = await self._state_store.get_mode_conversation_id(umo, "rest")
         if curr_cid == work_cid:
             return "work"
         if curr_cid == rest_cid:
@@ -368,14 +368,14 @@ class CharacterSplitPlugin(Star):
 
         await self._state_store.ensure_state()
         if target == "auto":
-            self._state_store.clear_session_override(key)
+            await self._state_store.clear_session_override(key)
             await self._state_store.save_state()
             return "Session mode override cleared."
 
         if target not in MODE_SET:
             return "Usage: /mode set work|rest|auto"
 
-        self._state_store.set_session_override(key, target)
+        await self._state_store.set_session_override(key, target)
         await self._state_store.save_state()
         return f"Session override set to: {target}"
 

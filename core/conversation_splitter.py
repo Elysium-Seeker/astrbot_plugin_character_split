@@ -1,6 +1,8 @@
+import inspect
 from typing import Any, Optional
 
 from .state_store import StateStore
+
 
 
 class ConversationSplitter:
@@ -38,8 +40,11 @@ class ConversationSplitter:
                     await conv_mgr.switch_conversation(umo, target_cid)
                     return True
                 return False
-            except Exception:
-                self._state_store.remove_mode_conversation_id(umo, mode)
+            except Exception as exc:
+                self._logger.warning(
+                    f"switch_conversation to existing mode conversation failed: {exc}. "
+                    "Will fallback to create a new mode conversation."
+                )
 
         if curr_cid:
             await self._run_pre_switch_hook(pre_switch_hook)
@@ -69,22 +74,34 @@ class ConversationSplitter:
             self._logger.warning(f"pre-switch hook failed: {exc}")
 
     async def _new_conversation(self, conv_mgr: Any, umo: str, title: str) -> Optional[str]:
-        try:
-            return await conv_mgr.new_conversation(unified_msg_origin=umo, title=title)
-        except TypeError:
-            pass
-        except Exception as exc:
-            self._logger.warning(f"new_conversation failed (keywords): {exc}")
+        method = getattr(conv_mgr, "new_conversation", None)
+        if not callable(method):
+            self._logger.error("new_conversation method not found on conversation_manager")
+            return None
+
+        call_args = []
+        call_kwargs = {}
 
         try:
-            return await conv_mgr.new_conversation(umo, title=title)
-        except TypeError:
-            pass
-        except Exception as exc:
-            self._logger.warning(f"new_conversation failed (positional with title): {exc}")
+            signature = inspect.signature(method)
+            params = signature.parameters
+            has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            has_unified = "unified_msg_origin" in params
+            has_title = "title" in params
+
+            if has_unified or has_kwargs:
+                call_kwargs["unified_msg_origin"] = umo
+            else:
+                call_args.append(umo)
+
+            if has_title or has_kwargs:
+                call_kwargs["title"] = title
+        except (TypeError, ValueError):
+            # Fallback: prioritize explicit keyword call when introspection fails.
+            call_kwargs = {"unified_msg_origin": umo, "title": title}
 
         try:
-            return await conv_mgr.new_conversation(umo)
+            return await method(*call_args, **call_kwargs)
         except Exception as exc:
             self._logger.error(f"new_conversation failed: {exc}")
             return None

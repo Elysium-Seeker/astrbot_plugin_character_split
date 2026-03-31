@@ -2,15 +2,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Set, Tuple
 
 
+
 class SplitConfig:
     def __init__(self, raw_config: Any):
         self._raw = raw_config or {}
 
     def get(self, key: str, default: Any) -> Any:
-        try:
-            return self._raw.get(key, default)
-        except Exception:
-            return default
+        raw = self._raw
+        if isinstance(raw, dict):
+            return raw.get(key, default)
+
+        getter = getattr(raw, "get", None)
+        if callable(getter):
+            return getter(key, default)
+
+        return default
 
     def get_bool(self, key: str, default: bool) -> bool:
         value = self.get(key, default)
@@ -24,7 +30,7 @@ class SplitConfig:
         value = self.get(key, default)
         try:
             num = int(value)
-        except Exception:
+        except (TypeError, ValueError):
             num = default
         return max(minimum, min(maximum, num))
 
@@ -48,7 +54,7 @@ class SplitConfig:
                 continue
             try:
                 day = int(v)
-            except Exception:
+            except ValueError:
                 continue
             if 1 <= day <= 7:
                 values.add(day)
@@ -97,7 +103,7 @@ class SplitConfig:
         try:
             h = int(hh)
             m = int(mm)
-        except Exception:
+        except ValueError:
             return None
         if not (0 <= h <= 23 and 0 <= m <= 59):
             return None

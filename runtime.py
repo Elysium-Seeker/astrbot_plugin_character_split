@@ -1,32 +1,16 @@
-"""pyright: reportMissingImports=false"""
+# pyright: reportMissingImports=false
 
-import importlib
+import logging
 from typing import Any
 
 try:
-    _astr_api = importlib.import_module("astrbot.api")
-    _event_mod = importlib.import_module("astrbot.api.event")
-    _star_mod = importlib.import_module("astrbot.api.star")
-    _provider_mod = importlib.import_module("astrbot.api.provider")
-
-    logger = _astr_api.logger
-    AstrBotConfig = getattr(_astr_api, "AstrBotConfig", dict)
-    AstrMessageEvent = _event_mod.AstrMessageEvent
-    filter = _event_mod.filter
-    Context = _star_mod.Context
-    Star = _star_mod.Star
-    register = _star_mod.register
-    ProviderRequest = _provider_mod.ProviderRequest
-except Exception:  # pragma: no cover
-    class _DummyLogger:
-        def info(self, msg: str):
-            print(msg)
-
-        def warning(self, msg: str):
-            print(msg)
-
-        def error(self, msg: str):
-            print(msg)
+    from astrbot.api import AstrBotConfig, logger
+    from astrbot.api.event import AstrMessageEvent, filter
+    from astrbot.api.provider import ProviderRequest
+    from astrbot.api.star import Context, Star, register
+except ImportError:  # pragma: no cover
+    logger = logging.getLogger("astrbot_plugin_character_split.runtime")
+    logger.addHandler(logging.NullHandler())
 
     class _DummyCommandGroup:
         @staticmethod
@@ -74,14 +58,11 @@ except Exception:  # pragma: no cover
     class AstrMessageEvent:  # type: ignore
         pass
 
-    logger = _DummyLogger()
     filter = _DummyFilter()
     AstrBotConfig = dict
     ProviderRequest = Any
 
 try:
-    get_astrbot_data_path = importlib.import_module(
-        "astrbot.core.utils.astrbot_path"
-    ).get_astrbot_data_path
-except Exception:  # pragma: no cover
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+except ImportError:  # pragma: no cover
     get_astrbot_data_path = None

@@ -2,6 +2,7 @@ from .config import SplitConfig
 from .constants import MODE_WORK
 
 
+
 class PersonaPromptBuilder:
     def __init__(self, config: SplitConfig):
         self._config = config

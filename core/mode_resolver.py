@@ -5,6 +5,7 @@ from .constants import MODE_REST, MODE_SET, MODE_WORK
 from .state_store import StateStore
 
 
+
 class ModeResolver:
     def __init__(self, config: SplitConfig, state_store: StateStore):
         self._config = config
@@ -13,6 +14,8 @@ class ModeResolver:
     async def resolve_mode(self, session_id: str, umo: str) -> Tuple[str, str]:
         await self._state_store.ensure_state()
 
+        # Priority is intentionally schedule-first after manual override.
+        # Current order: override > time > config list > default.
         for key in (session_id, umo):
             override = self._state_store.get_session_override(key)
             if key and override in MODE_SET:

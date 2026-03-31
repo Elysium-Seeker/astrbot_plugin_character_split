@@ -1,5 +1,6 @@
-"""pyright: reportMissingImports=false"""
+# pyright: reportMissingImports=false
 
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -13,16 +14,7 @@ try:
         SplitConfig,
         StateStore,
     )
-    from .runtime import (
-        AstrMessageEvent,
-        Context,
-        Star,
-        filter,
-        get_astrbot_data_path,
-        logger,
-        register,
-    )
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     from core import (  # type: ignore
         ConversationSplitter,
         MODE_SET,
@@ -33,18 +25,35 @@ except Exception:  # pragma: no cover
         SplitConfig,
         StateStore,
     )
-    from runtime import (  # type: ignore
-        AstrMessageEvent,
-        Context,
-        Star,
-        filter,
-        get_astrbot_data_path,
-        logger,
-        register,
-    )
 
+try:
+    from astrbot.api import logger
+    from astrbot.api.event import AstrMessageEvent, filter
+    from astrbot.api.provider import ProviderRequest
+    from astrbot.api.star import Context, Star, register
+except ImportError:  # pragma: no cover
+    try:
+        from .runtime import (  # type: ignore
+            AstrMessageEvent,
+            Context,
+            ProviderRequest,
+            Star,
+            filter,
+            logger,
+            register,
+        )
+    except ImportError:  # pragma: no cover
+        from runtime import (  # type: ignore
+            AstrMessageEvent,
+            Context,
+            ProviderRequest,
+            Star,
+            filter,
+            logger,
+            register,
+        )
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.10")
+@register("character_split", "Elysium-Seeker", "Split work/rest dialog for mnemosyne memory backend", "1.0.1")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -57,6 +66,7 @@ class CharacterSplitPlugin(Star):
         self._conversation_splitter = ConversationSplitter(self._state_store, logger)
         self._warned_missing_mnemosyne = False
         self._warned_missing_mnemosyne_recall = False
+        self._runtime_state_lock = Lock()
         self._mode_dirty_runtime: Dict[str, Dict[str, bool]] = {}
 
     async def initialize(self):
@@ -129,7 +139,7 @@ class CharacterSplitPlugin(Star):
         priority=10,
         desc="拦截 LLM 请求前置钩子：根据时间和用户配置判定工作状况并剥离上下文及注入增量提示词",
     )
-    async def on_llm_request(self, event: Any, req: Any):
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         try:
             session_id, umo = self._get_session_identifiers(event)
             mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
@@ -158,8 +168,8 @@ class CharacterSplitPlugin(Star):
             old_prompt = getattr(req, "system_prompt", "") or ""
             merged = (old_prompt.strip() + "\n\n" + f"[Mode]\nCurrent mode: {mode}\n{persona_prompt}").strip()
             req.system_prompt = merged
-        except Exception as exc:
-            logger.error(f"character_split on_llm_request failed: {exc}")
+        except Exception:
+            logger.exception("character_split on_llm_request failed")
 
     async def _get_loaded_stars(self) -> List[Any]:
         get_all_stars = getattr(self.context, "get_all_stars", None)
@@ -188,36 +198,41 @@ class CharacterSplitPlugin(Star):
         stars = await self._get_loaded_stars()
         for star in stars:
             if self._is_mnemosyne_star(star):
-                self._warned_missing_mnemosyne = False
+                with self._runtime_state_lock:
+                    self._warned_missing_mnemosyne = False
                 return True
         return False
 
     def _warn_missing_mnemosyne_once(self):
-        if self._warned_missing_mnemosyne:
-            return
-        logger.warning(
-            "character_split: mnemosyne backend unavailable. Split is temporarily disabled to preserve single-conversation context. "
-            "Set require_mnemosyne_for_split=false to force split without mnemosyne."
-        )
-        self._warned_missing_mnemosyne = True
+        with self._runtime_state_lock:
+            if self._warned_missing_mnemosyne:
+                return
+            logger.warning(
+                "character_split: mnemosyne backend unavailable. Split is temporarily disabled to preserve single-conversation context. "
+                "Set require_mnemosyne_for_split=false to force split without mnemosyne."
+            )
+            self._warned_missing_mnemosyne = True
 
     def _mark_mode_dirty(self, umo: str, mode: str):
         if not umo or mode not in MODE_SET:
             return
-        state = self._mode_dirty_runtime.setdefault(umo, {})
-        state[mode] = True
+        with self._runtime_state_lock:
+            state = self._mode_dirty_runtime.setdefault(umo, {})
+            state[mode] = True
 
     def _clear_mode_dirty(self, umo: str, mode: str):
         if not umo or mode not in MODE_SET:
             return
-        state = self._mode_dirty_runtime.setdefault(umo, {})
-        state[mode] = False
+        with self._runtime_state_lock:
+            state = self._mode_dirty_runtime.setdefault(umo, {})
+            state[mode] = False
 
     def _is_mode_dirty(self, umo: str, mode: str) -> bool:
         if not umo or mode not in MODE_SET:
             return False
-        state = self._mode_dirty_runtime.get(umo, {})
-        return bool(state.get(mode, False))
+        with self._runtime_state_lock:
+            state = self._mode_dirty_runtime.get(umo, {})
+            return bool(state.get(mode, False))
 
     async def _get_current_mode_from_conversation(self, umo: str) -> Optional[str]:
         if not umo:
@@ -374,7 +389,8 @@ class CharacterSplitPlugin(Star):
                             result = method(*args)
                             if hasattr(result, "__await__"):
                                 await result
-                            self._warned_missing_mnemosyne_recall = False
+                            with self._runtime_state_lock:
+                                self._warned_missing_mnemosyne_recall = False
                             logger.info(
                                 f"character_split mnemosyne recall via {method_name} succeeded"
                             )
@@ -387,19 +403,19 @@ class CharacterSplitPlugin(Star):
                             )
                             break
 
-        if not self._warned_missing_mnemosyne_recall:
-            logger.warning(
-                "character_split: mode switched but no mnemosyne recall API matched. "
-                "Set force_mnemosyne_recall_on_mode_switch=false if you do not need forced recall."
-            )
-            self._warned_missing_mnemosyne_recall = True
+        with self._runtime_state_lock:
+            if not self._warned_missing_mnemosyne_recall:
+                logger.warning(
+                    "character_split: mode switched but no mnemosyne recall API matched. "
+                    "Set force_mnemosyne_recall_on_mode_switch=false if you do not need forced recall."
+                )
+                self._warned_missing_mnemosyne_recall = True
 
     def _create_state_store(self) -> StateStore:
         return StateStore(
             plugin_name=str(getattr(self, "name", PLUGIN_NAME) or PLUGIN_NAME),
             state_kv_key=STATE_KV_KEY,
             logger=logger,
-            get_data_path_func=get_astrbot_data_path,
             get_kv_data_func=getattr(self, "get_kv_data", None),
             put_kv_data_func=getattr(self, "put_kv_data", None),
         )

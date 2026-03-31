@@ -1,6 +1,16 @@
+# pyright: reportMissingImports=false
+
+import asyncio
 import json
+from copy import deepcopy
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, Optional
+
+try:
+    from astrbot.api.star import StarTools
+except ImportError:  # pragma: no cover
+    StarTools = None  # type: ignore
 
 
 class StateStore:
@@ -20,75 +30,89 @@ class StateStore:
         self._get_kv_data_func = get_kv_data_func
         self._put_kv_data_func = put_kv_data_func
         self._state: Optional[Dict[str, Any]] = None
+        self._state_lock = asyncio.Lock()
+        self._state_data_lock = RLock()
 
     async def ensure_state(self) -> Dict[str, Any]:
-        if self._state is not None:
-            return self._state
+        async with self._state_lock:
+            if self._state is not None:
+                return self._state
 
-        state = await self._load_state_from_kv()
-        if state is None:
-            state = self._load_state_from_file()
+            state = await self._load_state_from_kv()
+            if state is None:
+                state = self._load_state_from_file()
 
-        self._state = self._normalize_state(state)
-        return self._state
+            normalized = self._normalize_state(state)
+            with self._state_data_lock:
+                self._state = normalized
+                return self._state
 
     async def save_state(self):
-        if self._state is None:
-            return
+        async with self._state_lock:
+            with self._state_data_lock:
+                if self._state is None:
+                    return
+                state_snapshot = deepcopy(self._state)
 
         if self._put_kv_data_func is not None:
             try:
-                await self._put_kv_data_func(self._state_kv_key, self._state)
+                await self._put_kv_data_func(self._state_kv_key, state_snapshot)
             except Exception as exc:
                 self._logger.warning(f"save kv state failed: {exc}")
 
         try:
             path = self._state_file_path()
             path.write_text(
-                json.dumps(self._state, ensure_ascii=False, indent=2),
+                json.dumps(state_snapshot, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception as exc:
             self._logger.warning(f"save file state failed: {exc}")
 
     def get_session_override(self, key: str) -> Optional[str]:
-        if not self._state or not key:
-            return None
-        value = self._state["session_overrides"].get(key)
+        with self._state_data_lock:
+            if not self._state or not key:
+                return None
+            value = self._state["session_overrides"].get(key)
         if isinstance(value, str):
             return value
         return None
 
     def set_session_override(self, key: str, mode: str):
-        if not self._state or not key:
-            return
-        self._state["session_overrides"][key] = mode
+        with self._state_data_lock:
+            if not self._state or not key:
+                return
+            self._state["session_overrides"][key] = mode
 
     def clear_session_override(self, key: str):
-        if not self._state or not key:
-            return
-        self._state["session_overrides"].pop(key, None)
+        with self._state_data_lock:
+            if not self._state or not key:
+                return
+            self._state["session_overrides"].pop(key, None)
 
     def get_mode_conversation_id(self, umo: str, mode: str) -> Optional[str]:
-        if not self._state or not umo:
-            return None
-        session_map = self._state["session_conversations"].get(umo, {})
-        value = session_map.get(mode)
+        with self._state_data_lock:
+            if not self._state or not umo:
+                return None
+            session_map = self._state["session_conversations"].get(umo, {})
+            value = session_map.get(mode)
         if isinstance(value, str):
             return value
         return None
 
     def set_mode_conversation_id(self, umo: str, mode: str, conversation_id: str):
-        if not self._state or not umo:
-            return
-        session_map = self._state["session_conversations"].setdefault(umo, {})
-        session_map[mode] = conversation_id
+        with self._state_data_lock:
+            if not self._state or not umo:
+                return
+            session_map = self._state["session_conversations"].setdefault(umo, {})
+            session_map[mode] = conversation_id
 
     def remove_mode_conversation_id(self, umo: str, mode: str):
-        if not self._state or not umo:
-            return
-        session_map = self._state["session_conversations"].setdefault(umo, {})
-        session_map.pop(mode, None)
+        with self._state_data_lock:
+            if not self._state or not umo:
+                return
+            session_map = self._state["session_conversations"].setdefault(umo, {})
+            session_map.pop(mode, None)
 
     async def _load_state_from_kv(self) -> Optional[Dict[str, Any]]:
         if self._get_kv_data_func is None:
@@ -117,18 +141,28 @@ class StateStore:
         return self._default_state()
 
     def _state_file_path(self) -> Path:
-        if self._get_data_path_func is not None:
+        if StarTools is not None:
+            try:
+                base = Path(str(StarTools.get_data_dir())) / self._plugin_name
+            except Exception as exc:
+                self._logger.warning(f"resolve data dir from StarTools failed: {exc}")
+                base = self._fallback_data_dir()
+        elif self._get_data_path_func is not None:
             try:
                 raw_base = self._get_data_path_func()
                 base_root = raw_base if isinstance(raw_base, Path) else Path(str(raw_base))
                 base = base_root / "plugin_data" / self._plugin_name
-            except Exception:
-                base = Path(__file__).resolve().parent.parent / "data"
+            except Exception as exc:
+                self._logger.warning(f"resolve data dir from get_data_path_func failed: {exc}")
+                base = self._fallback_data_dir()
         else:
-            base = Path(__file__).resolve().parent.parent / "data"
+            base = self._fallback_data_dir()
 
         base.mkdir(parents=True, exist_ok=True)
         return base / "state.json"
+
+    def _fallback_data_dir(self) -> Path:
+        return Path.cwd() / ".astrbot_plugin_data" / self._plugin_name
 
     def _normalize_state(self, raw: Any) -> Dict[str, Any]:
         base = self._default_state()

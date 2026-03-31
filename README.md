@@ -1,12 +1,29 @@
-﻿# astrbot_plugin_character_split
+﻿<div align="center">
 
-[License](https://opensource.org/licenses/MIT) [Python 3.10+](https://www.python.org/) [AstrBot](https://github.com/Soulter/AstrBot)
+# AstrBot Plugin Character Split
+
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![AstrBot](https://img.shields.io/badge/AstrBot-Support-brightgreen.svg)](https://github.com/Soulter/AstrBot)
+
+<img src="https://count.getloli.com/get/@astrbot-plugin-character-split?theme=booru-helltaker" alt="Moe Counter">
 
 专门给群聊/私聊做上下文隔离的 **人格与记忆多开插件**。
+
+</div>
 
 解决什么痛点？**白天你让 Bot 帮你写代码查资料，晚上你想找它闲聊，结果它满嘴都是白天的专业术语，上下文全都串味了。**
 
 这个插件就是干这个的：按时间（或手动）把对话分成“工作”和“休息”两条平行宇宙，并且自带了一个纯本地的**三层记忆系统**，确保它在对的时间表现出对的性格，还能记住对的事。
+
+## 🆕 更新日志
+
+### v1.1.6
+- 套用用户偏好的大字居中模板、Shields UI 徽章，并加入了 `booru-helltaker` 主题的 Moe Counter。
+
+### v1.1.5 & v1.1.4
+- 彻底用通俗人话重写所有文案说明与指令描述。
+- 重构底层存储，引入纯本地三层记忆（Layer 1 全局 / Layer 2 模式 / Layer 3 会话）。
 
 ## 🌟 核心特性
 
@@ -44,4 +61,3 @@
 | `/csmem sync` | 觉得 Bot 脑子跟不上？赶紧手动敲一锤，让它立刻把刚刚聊的总结存起来 |
 
 *(如有需要，你甚至可以像使用 /mode set auto 这样兼容旧版本的指令写法。感谢使用！)*
-

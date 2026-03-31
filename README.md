@@ -1,8 +1,19 @@
-# astrbot_plugin_character_split
+<div align="center">
+  <img src="https://count.getloli.com/@astrbot_plugin_character_split?name=astrbot_plugin_character_split&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" />
+</div>
 
-工作/休息人格分流插件（时间驱动模式）。
+<h1 align="center">astrbot_plugin_character_split</h1>
 
-[License](https://opensource.org/licenses/MIT) [Python 3.10+](https://www.python.org/) [AstrBot](https://github.com/Soulter/AstrBot)
+<div align="center">
+  ✨ <i>人格分流插件</i> ✨
+</div>
+
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python"></a>
+  <a href="https://github.com/Soulter/AstrBot"><img src="https://img.shields.io/badge/AstrBot-4.9.2%2B-eb4d4b.svg" alt="AstrBot"></a>
+  <a href="https://github.com/Elysium-Seeker/astrbot_plugin_character_split"><img src="https://img.shields.io/badge/作者-Elysium--Seeker-blue.svg" alt="GitHub"></a>
+</p>
 
 ## 📖 介绍
 

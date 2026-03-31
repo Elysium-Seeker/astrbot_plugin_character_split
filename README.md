@@ -1,23 +1,79 @@
 # astrbot_plugin_character_split
 
-工作/休息人格分流插件（时间驱动模式）。
+✨ 智能人格分流插件 ✨
 
-定位很单一：
+[License](https://opensource.org/licenses/MIT) [Python 3.10+](https://www.python.org/) [AstrBot](https://github.com/Soulter/AstrBot)
 
-- 只负责把同一会话分成 work / rest 两条对话上下文
-- 只负责注入“同一人格核心 + 模式增强”提示词
-- 不负责长期记忆写入或检索
+## 📖 介绍
 
-长期记忆统一由 `astrbot_plugin_mnemosyne` 处理。
+工作与休息模式分离对话，共享记忆的智能人格切换插件。
 
-## 工程结构
+只专注一件事：**根据时间、会话类型自动切换人格与独立的对话上下文，让 AI Bot 更像真实的伴侣 / 同事。**
 
-- `main.py`: 插件薄入口（命令、钩子、模块编排）
-- `runtime.py`: AstrBot 运行时导入与无依赖 fallback
-- `core/config.py`: 配置读取与时间解析
-- `core/state_store.py`: 状态持久化（override + 会话映射）
-- `core/mode_resolver.py`: 模式判定（override > time > whitelist > default）
-- `core/persona_prompt.py`: 人格提示词拼接（核心人格 + 模式增强）
+主要特性：
+- **上下文分流**：根据当前模式（工作 / 休息）在同一群聊/私聊中开辟两段独立对话上下文，工作时不闲聊，休息时不谈工作。
+- **动态 Prompt 增强**：“核心人格 + 模式增量人格”，同一身份在不同环境展现不同侧面。
+- **与长期记忆系统联动**：完全适配且推荐搭配 `astrbot_plugin_mnemosyne`，在切换人格时自动触发记忆存档（Checkpoint）与提取（Recall）。
+
+## 💿 安装
+
+1. 直接在 AstrBot 的插件市场搜索 `astrbot_plugin_character_split`，点击安装，等待完成即可。
+2. 或使用命令行安装：`/plugin install https://github.com/yourname/astrbot_plugin_character_split`
+
+## ⚙️ 配置
+
+请在 AstrBot 的插件 WebUI 配置面板查看并修改，支持的配置项：
+
+- 时区与时间窗口：工作日选择、明确的工作时间段（支持跨天）。
+- 强制分流名单：将特定会话强制绑定为工作/休息。
+- 增强提示词：自定义你的 Work / Rest / Core 提示词片段。
+- 记忆联动相关参数及防抖跳跃等高阶配置。
+
+## 🎉 指令
+
+| 指令 | 权限 | 说明 |
+| --- | --- | --- |
+| `/mode help` | 所有人 | 查看 mode 指令帮助 |
+| `/mode status` | 所有人 | 查看当前模式与判定来源（时间/配置/覆写） |
+| `/mode work` | 所有人 | 当前会话覆盖强制为工作模式 |
+| `/mode rest` | 所有人 | 当前会话覆盖强制为休息模式 |
+| `/mode auto` | 所有人 | 清除历史手动覆写状态，恢复自动时间判定 |
+| `/mode set work\|rest\|auto` | 所有人 | 兼容旧版用法 |
+
+## 🧠 插件工作流程
+
+每一条发送给 LLM 的请求（LLM Request）经过此插件的流转过程：
+
+1. **会话鉴权与解析**：获取当前 session_id / umo（通用消息来源）。
+2. **模式判定解析器 (Mode Resolver)**：
+   - 覆写判定 (Override)：用户是否通过指令强制指定了当次模式？
+   - 时间判定 (Time)：当前时间是否在工作日的工作时间窗内？
+   - 黑白名单 (Whitelist)：会话是否配置为纯工作或纯休息？
+   - 降级回落 (Default)：回落至配置的默认模式。
+3. **上下文切换与记忆联动**：
+   - 根据判定结果确认会话归属。若跨越模式边界，优先触发 `mnemosyne` 的归档存储（Checkpoint）。
+   - 载入并关联新模式的上下文 ID，并触发记忆提取（Recall）。
+4. **提示词增强合成**：
+   - 读取 Core Prompt（稳定身份与价值观）。
+   - 根据当前模式叠加 Work/Rest Prompt 增强补丁。
+   - 动态合并至发往 LLM 的 System Prompt。
+
+## 🧩 内部结构
+
+本项目为高内聚设计：
+- `main.py`: 插件薄入口（命令分配、生命周期钩子、模块编排）。
+- `runtime.py`: AstrBot 运行时导入与无感 fallback。
+- `core/config.py`: 配置读取与时区时间智能解析。
+- `core/state_store.py`: K/V 与文件双机制状态持久化。
+- `core/mode_resolver.py`: 状态机分层判定核心。
+- `core/persona_prompt.py`: 增量式人格聚合工厂。
+- `core/conversation_splitter.py`: 负责处理会话轨道的剥离与并线。
+
+## 🎉 致谢
+
+感谢 [AstrBot](https://github.com/Soulter/AstrBot) 提供高度可扩展的框架底座。
+如果你觉得这个插件好用，欢迎点亮 Star 以示支持！🌟
+
 - `core/conversation_splitter.py`: work/rest 对话切换与创建
 
 ## 实际行为

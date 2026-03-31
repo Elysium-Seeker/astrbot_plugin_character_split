@@ -67,17 +67,17 @@ class CharacterSplitPlugin(Star):
 
     @filter.command_group(
         "mode",
-        desc="模式管理指令组。",
+        desc="工作/休息模式控制台",
     )
     def mode(self):
         """Mode command group"""
 
-    @mode.command("help", desc="查看 mode 指令帮助。")
+    @mode.command("help", desc="查看 mode 指令帮助面板")
     async def mode_help(self, event: Any):
         """Show mode command help"""
         yield event.plain_result(self._help_text())
 
-    @mode.command("status", desc="查看当前模式与判定来源。")
+    @mode.command("status", desc="查询当前生效模式及触发来源（如时间、覆写配置）")
     async def mode_status(self, event: Any):
         """Show current mode status"""
         session_id, umo = self._get_session_identifiers(event)
@@ -96,25 +96,25 @@ class CharacterSplitPlugin(Star):
         )
         yield event.plain_result(text)
 
-    @mode.command("work", desc="当前会话固定为工作模式。")
+    @mode.command("work", desc="锁定当前会话为工作模式")
     async def mode_work(self, event: Any):
         """Force work mode for current session"""
         msg = await self._set_mode_override(event, "work")
         yield event.plain_result(msg)
 
-    @mode.command("rest", desc="当前会话固定为休息模式。")
+    @mode.command("rest", desc="锁定当前会话为休息模式")
     async def mode_rest(self, event: Any):
         """Force rest mode for current session"""
         msg = await self._set_mode_override(event, "rest")
         yield event.plain_result(msg)
 
-    @mode.command("auto", desc="清除覆盖，恢复自动判定。")
+    @mode.command("auto", desc="解除强制锁定，恢复时间规则自动调度")
     async def mode_auto(self, event: Any):
         """Reset to auto mode resolution"""
         msg = await self._set_mode_override(event, "auto")
         yield event.plain_result(msg)
 
-    @mode.command("set", desc="兼容旧用法：/mode set work|rest|auto。")
+    @mode.command("set", desc="兼容旧版：参数填 work/rest/auto 快速锁定模式")
     async def mode_set(self, event: Any, target: str = ""):
         """Compatibility command for /mode set work|rest|auto"""
         target = (target or "").strip().lower()
@@ -127,7 +127,7 @@ class CharacterSplitPlugin(Star):
 
     @filter.on_llm_request(
         priority=10,
-        desc="LLM 请求前置钩子：按 override/time/whitelist/default 判定 work/rest，切换对应会话并注入模式增强提示词。",
+        desc="拦截 LLM 请求前置钩子：根据时间和用户配置判定工作状况并剥离上下文及注入增量提示词",
     )
     async def on_llm_request(self, event: Any, req: Any):
         try:

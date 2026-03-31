@@ -1,5 +1,5 @@
-<div align="center">
-  <img src="https://count.getloli.com/@astrbot_plugin_character_split?name=astrbot_plugin_character_split&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" />
+﻿<div align="center">
+  <img src="https://count.getloli.com/@astrbot_plugin_character_split?name=astrbot_plugin_character_split&theme=booru-helltaker&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" />
 </div>
 
 <h1 align="center">astrbot_plugin_character_split</h1>

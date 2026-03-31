@@ -46,6 +46,10 @@ class ConversationSplitter:
         new_title = f"{mode}:{getattr(event, 'get_sender_name', lambda: 'user')()}"
         new_cid = await self._new_conversation(conv_mgr, umo, new_title)
         if new_cid:
+            try:
+                await conv_mgr.switch_conversation(umo, new_cid)
+            except Exception as exc:
+                self._logger.warning(f"switch_conversation to new mode conversation failed: {exc}")
             self._state_store.set_mode_conversation_id(umo, mode, new_cid)
             await self._state_store.save_state()
 

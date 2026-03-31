@@ -1,9 +1,7 @@
 # pyright: reportMissingImports=false
 
 import asyncio
-import copy
-import inspect
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 try:
     from .core import (
@@ -36,7 +34,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.api.star import StarTools
 
-@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.0")
+@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.4")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -77,10 +75,9 @@ class CharacterSplitPlugin(Star):
         """Show current mode status"""
         session_id, umo = self._get_session_identifiers(event)
         mode, source = await self._mode_resolver.resolve_mode(session_id, umo)
-        
-        # count memory items
-        memories = await self._memory_manager.get_recent_memories(umo, mode, limit=100, strategy="recent")
-        mem_count = len(memories)
+
+        layers = await self._memory_manager.get_layered_memories(umo, mode)
+        mem_count = sum(len(items) for items in layers.values())
 
         text = (
             f"mode: {mode} ({source})\n"
@@ -124,22 +121,42 @@ class CharacterSplitPlugin(Star):
     def csmem(self):
         """Memory management group"""
 
-    @csmem.command("list", desc="列出当前模式下记录的记忆事实")
+    @csmem.command("list", desc="按三层结构列出当前可用记忆")
     async def mem_list(self, event: AstrMessageEvent):
-        """List current memories"""
+        """List current memories grouped by memory layer"""
         session_id, umo = self._get_session_identifiers(event)
         mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
-        memories = await self._memory_manager.get_recent_memories(umo, mode, limit=20, strategy="recent")
-        
-        if not memories:
-            yield event.plain_result(f"当前模式 [{mode}] 暂无长期记忆。")
+
+        layers = await self._memory_manager.get_layered_memories(
+            umo,
+            mode,
+            global_limit=10,
+            mode_limit=10,
+            session_limit=10,
+        )
+        total = sum(len(items) for items in layers.values())
+
+        if total == 0:
+            yield event.plain_result(f"当前模式 [{mode}] 暂无可用记忆。")
             return
-            
-        output = f"[{mode}] 下的近期记忆:\n"
-        for idx, m in enumerate(memories, 1):
-            imp = m.get('importance', 5)
-            output += f"{m['id']}. [⭐{imp}] {m['title']} : {m['content']} ({m['timestamp']})\n"
-        yield event.plain_result(output)
+
+        scope_names = {
+            "global": "Layer1-全局",
+            "mode": f"Layer2-{mode}",
+            "session": "Layer3-会话",
+        }
+        output = [f"[{mode}] 三层记忆总数: {total}"]
+        for scope in ("global", "mode", "session"):
+            items = layers.get(scope, [])
+            output.append(f"\n[{scope_names[scope]}] ({len(items)})")
+            if not items:
+                output.append("- (空)")
+                continue
+            for m in items:
+                imp = m.get("importance", 5)
+                output.append(f"- #{m['id']} [⭐{imp}] {m['title']}: {m['content']}")
+
+        yield event.plain_result("\n".join(output))
 
     @csmem.command("rm", desc="删除指定ID的记忆事实")
     async def mem_rm(self, event: AstrMessageEvent, mem_id: int):
@@ -177,7 +194,7 @@ class CharacterSplitPlugin(Star):
             yield event.plain_result(f"当前模式 [{mode}] 对话历史过短，暂无需提取记忆。")
             return
 
-        yield event.plain_result(f"⏳ 正在后台提取当前模式 [{mode}] 的长期记忆...")
+        yield event.plain_result(f"⏳ 正在后台提取当前模式 [{mode}] 的三层记忆...")
         import asyncio
         asyncio.create_task(
             self._memory_manager.trigger_summary_and_save(self.context, umo, mode, history)
@@ -213,7 +230,7 @@ class CharacterSplitPlugin(Star):
                     except Exception as e:
                         logger.warning(f"character_split failed to sync req context: {e}")
 
-            await self._mark_mode_dirty(umo, mode)
+            self._mark_mode_dirty(umo, mode)
             await self._inject_mode_prompt(req, mode, umo)
         except Exception:
             logger.exception("character_split on_llm_request failed")
@@ -264,17 +281,27 @@ class CharacterSplitPlugin(Star):
 
     async def _inject_mode_prompt(self, req: ProviderRequest, mode: str, umo: str):
         persona_prompt = self._persona_builder.build(mode)
-        
-        memories = await self._memory_manager.get_recent_memories(umo, mode, limit=5)
-        mem_str = ""
-        if memories:
-            mem_str = "[当前模式核心记忆与纪要]\n====================\n"
-            for m in memories:
-                mem_str += f"- {m['title']}: {m['content']}\n"
-            mem_str += "====================\n"
-            
+        layers = await self._memory_manager.get_layered_memories(umo, mode)
+
+        mem_blocks = []
+        mem_blocks.append(self._format_layer_block("Layer1 全局长期", layers.get("global", [])))
+        mem_blocks.append(self._format_layer_block(f"Layer2 {mode} 模式", layers.get("mode", [])))
+        mem_blocks.append(self._format_layer_block("Layer3 当前会话", layers.get("session", [])))
+        mem_str = "\n\n".join(block for block in mem_blocks if block)
+
         old_prompt = getattr(req, "system_prompt", "") or ""
-        req.system_prompt = (old_prompt.strip() + f"\n\n[Mode]\nCurrent mode: {mode}\n{persona_prompt}\n\n{mem_str}").strip()
+        req.system_prompt = (
+            old_prompt.strip() + f"\n\n[Mode]\nCurrent mode: {mode}\n{persona_prompt}\n\n{mem_str}"
+        ).strip()
+
+    def _format_layer_block(self, title: str, memories: Any) -> str:
+        if not memories:
+            return ""
+
+        lines = [f"[{title}]"]
+        for mem in memories:
+            lines.append(f"- {mem.get('title', '')}: {mem.get('content', '')}")
+        return "\n".join(lines)
 
     async def _get_conversation_manager(self):
         return getattr(self.context, "conversation_manager", None)
@@ -370,6 +397,7 @@ class CharacterSplitPlugin(Star):
             "/mode auto - 解除锁定恢复自动\n"
             "/mode set work|rest|auto\n"
             "----- 记忆管理 -----\n"
-            "/csmem list - 查看本模式长期记忆\n"
+            "/csmem list - 查看三层记忆\n"
             "/csmem rm <id> - 删除指定记忆\n"
+            "/csmem sync - 手动触发三层记忆提取\n"
         )

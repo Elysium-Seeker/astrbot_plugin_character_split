@@ -1,8 +1,14 @@
-import sqlite3
-import os
 import asyncio
 import json
-from typing import List, Dict, Any, Optional
+import os
+import sqlite3
+from typing import Any, Dict, List
+
+SCOPE_GLOBAL = "global"
+SCOPE_MODE = "mode"
+SCOPE_SESSION = "session"
+ALLOWED_SCOPES = (SCOPE_GLOBAL, SCOPE_MODE, SCOPE_SESSION)
+
 
 class MemoryManager:
     def __init__(self, data_dir: str, logger: Any):
@@ -15,7 +21,8 @@ class MemoryManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
+                cursor.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS mode_memories (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         umo TEXT NOT NULL,
@@ -26,9 +33,15 @@ class MemoryManager:
                         importance INTEGER DEFAULT 5,
                         scope TEXT DEFAULT 'mode'
                     )
-                ''')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_umo_mode ON mode_memories (umo, mode)')
-                # Migrations
+                    """
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_umo_mode ON mode_memories (umo, mode)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_umo_scope ON mode_memories (umo, scope)")
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_umo_mode_scope ON mode_memories (umo, mode, scope)"
+                )
+
+                # legacy schema migrations
                 try:
                     cursor.execute("ALTER TABLE mode_memories ADD COLUMN importance INTEGER DEFAULT 5")
                 except sqlite3.OperationalError:
@@ -38,128 +51,314 @@ class MemoryManager:
                 except sqlite3.OperationalError:
                     pass
                 conn.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to initialize memory DB: {e}")
+        except Exception as exc:
+            self.logger.error(f"Failed to initialize memory DB: {exc}")
 
-    async def add_memory(self, umo: str, mode: str, title: str, content: str, importance: int = 5, scope: str = "mode") -> int:
-        def _add():
+    @staticmethod
+    def _normalize_scope(scope: str) -> str:
+        normalized = (scope or SCOPE_MODE).strip().lower()
+        return normalized if normalized in ALLOWED_SCOPES else SCOPE_MODE
+
+    @staticmethod
+    def _normalize_importance(raw: Any) -> int:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 5
+        return max(1, min(10, value))
+
+    @staticmethod
+    def _row_to_memory(row: Any) -> Dict[str, Any]:
+        return {
+            "id": row[0],
+            "title": row[1],
+            "content": row[2],
+            "timestamp": row[3],
+            "importance": row[4],
+            "scope": row[5],
+        }
+
+    async def add_memory(
+        self,
+        umo: str,
+        mode: str,
+        title: str,
+        content: str,
+        importance: int = 5,
+        scope: str = SCOPE_MODE,
+    ) -> int:
+        def _add() -> int:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "INSERT INTO mode_memories (umo, mode, title, content, importance, scope) VALUES (?, ?, ?, ?, ?, ?)",
-                    (umo, mode, title, content, importance, scope)
+                    (
+                        umo,
+                        mode,
+                        title.strip(),
+                        content.strip(),
+                        self._normalize_importance(importance),
+                        self._normalize_scope(scope),
+                    ),
                 )
                 conn.commit()
-                return cursor.lastrowid
+                return int(cursor.lastrowid)
+
         try:
             return await asyncio.to_thread(_add)
-        except Exception as e:
-            self.logger.error(f"Failed to add memory: {e}")
+        except Exception as exc:
+            self.logger.error(f"Failed to add memory: {exc}")
             return -1
 
-    async def get_layered_memories(self, umo: str, mode: str) -> Dict[str, List[Dict[str, Any]]]:
-        def _get():
+    async def get_layered_memories(
+        self,
+        umo: str,
+        mode: str,
+        global_limit: int = 5,
+        mode_limit: int = 5,
+        session_limit: int = 5,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        def _get() -> Dict[str, List[Dict[str, Any]]]:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                layers = {"global": [], "mode": [], "session": []}
-                
-                # Layer 1: global
-                cursor.execute("SELECT id, title, content, timestamp, importance, scope FROM mode_memories WHERE umo=? AND scope='global' ORDER BY importance DESC, id DESC LIMIT 5", (umo,))
-                layers["global"] = [{"id": r[0], "title": r[1], "content": r[2], "timestamp": r[3], "importance": r[4], "scope": r[5]} for r in cursor.fetchall()]
-                
-                # Layer 2: mode
-                cursor.execute("SELECT id, title, content, timestamp, importance, scope FROM mode_memories WHERE umo=? AND scope='mode' AND mode=? ORDER BY importance DESC, id DESC LIMIT 5", (umo, mode))
-                layers["mode"] = [{"id": r[0], "title": r[1], "content": r[2], "timestamp": r[3], "importance": r[4], "scope": r[5]} for r in cursor.fetchall()]
-                
-                # Layer 3: session (limit 5 recent)
-                cursor.execute("SELECT id, title, content, timestamp, importance, scope FROM mode_memories WHERE umo=? AND scope='session' AND mode=? ORDER BY id DESC LIMIT 5", (umo, mode))
-                s_rows = cursor.fetchall()
-                s_rows.sort(key=lambda x: x[0]) # keep chronological
-                layers["session"] = [{"id": r[0], "title": r[1], "content": r[2], "timestamp": r[3], "importance": r[4], "scope": r[5]} for r in s_rows]
-                
+                layers: Dict[str, List[Dict[str, Any]]] = {
+                    SCOPE_GLOBAL: [],
+                    SCOPE_MODE: [],
+                    SCOPE_SESSION: [],
+                }
+
+                cursor.execute(
+                    """
+                    SELECT id, title, content, timestamp, importance, scope
+                    FROM mode_memories
+                    WHERE umo = ? AND scope = ?
+                    ORDER BY importance DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (umo, SCOPE_GLOBAL, max(1, int(global_limit))),
+                )
+                layers[SCOPE_GLOBAL] = [self._row_to_memory(row) for row in cursor.fetchall()]
+
+                cursor.execute(
+                    """
+                    SELECT id, title, content, timestamp, importance, scope
+                    FROM mode_memories
+                    WHERE umo = ? AND mode = ? AND scope = ?
+                    ORDER BY importance DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (umo, mode, SCOPE_MODE, max(1, int(mode_limit))),
+                )
+                layers[SCOPE_MODE] = [self._row_to_memory(row) for row in cursor.fetchall()]
+
+                cursor.execute(
+                    """
+                    SELECT id, title, content, timestamp, importance, scope
+                    FROM mode_memories
+                    WHERE umo = ? AND mode = ? AND scope = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (umo, mode, SCOPE_SESSION, max(1, int(session_limit))),
+                )
+                session_rows = cursor.fetchall()
+                session_rows.sort(key=lambda row: row[0])
+                layers[SCOPE_SESSION] = [self._row_to_memory(row) for row in session_rows]
+
                 return layers
+
         try:
             return await asyncio.to_thread(_get)
-        except Exception as e:
-            self.logger.error(f"Failed to get layered memory: {e}")
-            return {"global": [], "mode": [], "session": []}
+        except Exception as exc:
+            self.logger.error(f"Failed to get layered memories: {exc}")
+            return {SCOPE_GLOBAL: [], SCOPE_MODE: [], SCOPE_SESSION: []}
 
-    async def remove_memory(self, umo: str, mem_id: int) -> bool:
-        def _remove():
+    async def get_recent_memories(
+        self,
+        umo: str,
+        mode: str,
+        limit: int = 5,
+        strategy: str = "recent",
+    ) -> List[Dict[str, Any]]:
+        """Compatibility method for old call-sites.
+
+        Returns a flattened list of memories related to current mode:
+        global + mode + session, sorted by id descending by default.
+        """
+
+        def _get() -> List[Dict[str, Any]]:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                # removal spans across all scopes
+                query = (
+                    """
+                    SELECT id, title, content, timestamp, importance, scope
+                    FROM mode_memories
+                    WHERE umo = ?
+                      AND (
+                        scope = ?
+                        OR (scope = ? AND mode = ?)
+                        OR (scope = ? AND mode = ?)
+                      )
+                    """
+                )
+
+                if strategy == "importance":
+                    query += " ORDER BY importance DESC, id DESC LIMIT ?"
+                else:
+                    query += " ORDER BY id DESC LIMIT ?"
+
+                cursor.execute(
+                    query,
+                    (
+                        umo,
+                        SCOPE_GLOBAL,
+                        SCOPE_MODE,
+                        mode,
+                        SCOPE_SESSION,
+                        mode,
+                        max(1, int(limit)),
+                    ),
+                )
+                return [self._row_to_memory(row) for row in cursor.fetchall()]
+
+        try:
+            return await asyncio.to_thread(_get)
+        except Exception as exc:
+            self.logger.error(f"Failed to get recent memories: {exc}")
+            return []
+
+    async def remove_memory(self, umo: str, mem_id: int) -> bool:
+        def _remove() -> bool:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
                 cursor.execute("DELETE FROM mode_memories WHERE umo = ? AND id = ?", (umo, mem_id))
                 conn.commit()
                 return cursor.rowcount > 0
+
         try:
             return await asyncio.to_thread(_remove)
-        except Exception as e:
-            self.logger.error(f"Failed to remove memory: {e}")
+        except Exception as exc:
+            self.logger.error(f"Failed to remove memory: {exc}")
             return False
 
-    async def trigger_summary_and_save(self, context: Any, umo: str, mode: str, history_contexts: List[Dict[str, Any]]):
+    @staticmethod
+    def _strip_markdown_code_fence(text: str) -> str:
+        cleaned = (text or "").strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        return cleaned.strip()
+
+    @staticmethod
+    def _build_history_text(history_contexts: List[Dict[str, Any]]) -> str:
+        parts: List[str] = []
+        for msg in history_contexts[-40:]:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                parts.append(f"{role}: {content}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _parse_memory_items(raw_json: str) -> List[Dict[str, Any]]:
+        parsed = json.loads(raw_json)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        if isinstance(parsed, dict):
+            memories = parsed.get("memories", [])
+            if isinstance(memories, list):
+                return [item for item in memories if isinstance(item, dict)]
+        return []
+
+    async def _memory_exists(self, umo: str, mode: str, scope: str, title: str, content: str) -> bool:
+        def _exists() -> bool:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM mode_memories
+                    WHERE umo = ?
+                      AND mode = ?
+                      AND scope = ?
+                      AND title = ?
+                      AND content = ?
+                    LIMIT 1
+                    """,
+                    (umo, mode, scope, title, content),
+                )
+                return cursor.fetchone() is not None
+
+        return await asyncio.to_thread(_exists)
+
+    async def trigger_summary_and_save(
+        self,
+        context: Any,
+        umo: str,
+        mode: str,
+        history_contexts: List[Dict[str, Any]],
+    ):
         if not history_contexts or len(history_contexts) < 2:
             return
-        
+
         try:
             provider_id = await context.get_current_chat_provider_id(umo)
             if not provider_id:
                 self.logger.warning(f"[Memory] No provider for {umo}")
                 return
-            
-            self.logger.info(f"[Memory] Triggering background summary for mode {mode} (UMO: {umo})")
-            
+
             system_prompt = (
-                "你是一个极其敏锐的【三层架构】记忆管理者。\n"
-                "请分析如下的对话历史，并将其进行分类提取为三个层级的记忆状态：\n\n"
-                "1. [scope: 'global']全局记忆 (Layer 1)：脱离当前场景也能通用的全局用户偏好、身份、习惯等长效设定（重要性 8-10分）。\n"
-                "2. [scope: 'mode']模式记忆 (Layer 2)：当前特定模式（工作/休息）下的专属场景规则、约定、或长效业务背景（重要性 5-8分）。\n"
-                "3. [scope: 'session']会话记忆 (Layer 3)：当前正在处理的具体任务、临时上下文或短期待办事项（重要性 1-5分）。\n\n"
-                "请严格以纯JSON数组格式返回（不要包含多余说明，若某一分类完全没有价值内容则直接跳过，全废话则返回空数组 []）：\n"
-                "[\n"
-                "  {\"scope\": \"global\", \"title\": \"代码偏好\", \"content\": \"要求不废话直接给代码\", \"importance\": 9},\n"
-                "  {\"scope\": \"mode\", \"title\": \"工作指令\", \"content\": \"严格遵照PEP8标准\", \"importance\": 7},\n"
-                "  {\"scope\": \"session\", \"title\": \"正在处理\", \"content\": \"正在升级三层级数据库架构\", \"importance\": 4}\n"
-                "]"
+                "你是一个三层记忆管理器。请从对话里提取有价值事实并按 scope 分类。\n"
+                "scope 可选值：global/mode/session。\n"
+                "global: 通用偏好或长期身份特征，importance 建议 8-10。\n"
+                "mode: 工作或休息模式下的长期规则，importance 建议 5-8。\n"
+                "session: 当前任务的短期上下文，importance 建议 1-5。\n"
+                "仅输出 JSON 数组，不要任何多余文本。\n"
+                "数组元素格式：{\"scope\":\"global\",\"title\":\"...\",\"content\":\"...\",\"importance\":8}"
             )
-            
-            history_text = ""
-            for msg in history_contexts[-40:]:
-                role = msg.get("role", "unknown")
-                msg_content = msg.get("content", "")
-                if isinstance(msg_content, str):
-                    history_text += f"{role}: {msg_content}\n"
-                    
-            resp = await context.llm_generate(
+
+            history_text = self._build_history_text(history_contexts)
+            response = await context.llm_generate(
                 chat_provider_id=provider_id,
                 system_prompt=system_prompt,
-                prompt=f"请提取三层记忆至JSON：\n{history_text}"
+                prompt=f"请提取三层记忆为 JSON：\n{history_text}",
             )
-            
-            text_result = resp.completion_text.strip()
-            if text_result.startswith("```json"):
-                text_result = text_result[7:]
-            if text_result.startswith("```"):
-                text_result = text_result[3:]
-            if text_result.endswith("```"):
-                text_result = text_result[:-3]
-            text_result = text_result.strip()
-            
-            data = json.loads(text_result)
-            for item in data:
-                title = item.get("title", "").strip()
-                content = item.get("content", "").strip()
-                importance = int(item.get("importance", 5))
-                scope = item.get("scope", "mode").strip().lower()
-                if scope not in ("global", "mode", "session"):
-                    scope = "mode"
-                    
-                if title and content and title.lower() != "none" and content.lower() != "none":
-                    mem_id = await self.add_memory(umo, mode, title, content, importance, scope)
-                    self.logger.info(f"[Memory] Extracted L-{scope} memory {mem_id} (imp:{importance}) for mode {mode}: {title}")
-                    
+
+            text_result = self._strip_markdown_code_fence(getattr(response, "completion_text", ""))
+            items = self._parse_memory_items(text_result)
+            if not items:
+                return
+
+            for item in items:
+                title = str(item.get("title", "")).strip()
+                content = str(item.get("content", "")).strip()
+                scope = self._normalize_scope(str(item.get("scope", SCOPE_MODE)))
+                importance = self._normalize_importance(item.get("importance", 5))
+
+                if not title or not content:
+                    continue
+                if title.lower() == "none" or content.lower() == "none":
+                    continue
+
+                exists = await self._memory_exists(umo, mode, scope, title, content)
+                if exists:
+                    continue
+
+                mem_id = await self.add_memory(
+                    umo=umo,
+                    mode=mode,
+                    title=title,
+                    content=content,
+                    importance=importance,
+                    scope=scope,
+                )
+                self.logger.info(
+                    f"[Memory] Added scope={scope} id={mem_id} importance={importance} mode={mode} title={title}"
+                )
         except json.JSONDecodeError:
-            self.logger.warning(f"[Memory] Failed to parse JSON from LLM: {getattr(resp, 'completion_text', 'No response')}")
-        except Exception as e:
-            self.logger.exception(f"[Memory] Error during summary for mode {mode}")
+            self.logger.warning("[Memory] LLM summary output is not valid JSON")
+        except Exception:
+            self.logger.exception(f"[Memory] Error during summary for mode={mode}")

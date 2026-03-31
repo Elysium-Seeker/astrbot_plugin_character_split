@@ -149,7 +149,38 @@ class CharacterSplitPlugin(Star):
             yield event.plain_result(f"已删除记录 #{mem_id}")
         else:
             yield event.plain_result(f"删除失败：未找到从属于你的记录 #{mem_id}")
+    @csmem.command("sync", desc="对当前会话历史立即进行记忆总结与提取")
+    async def mem_sync(self, event: AstrMessageEvent):
+        """Force run background memory summarization for current conversation"""
+        session_id, umo = self._get_session_identifiers(event)
+        mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
 
+        conv_mgr = await self._get_conversation_manager()
+        history = []
+        if conv_mgr:
+            try:
+                import json
+                cid = await self._conversation_splitter._call_conversation_method(
+                    conv_mgr.get_curr_conversation_id, umo, timeout_seconds=4.0
+                )
+                if cid:
+                    conv = await self._conversation_splitter._call_conversation_method(
+                        conv_mgr.get_conversation, umo, cid, timeout_seconds=4.0
+                    )
+                    if conv and hasattr(conv, "history"):
+                        history = json.loads(conv.history)
+            except Exception as e:
+                logger.warning(f"character_split failed to get history for sync: {e}")
+
+        if not history or len(history) < 2:
+            yield event.plain_result(f"当前模式 [{mode}] 对话历史过短，暂无需提取记忆。")
+            return
+
+        yield event.plain_result(f"⏳ 正在后台提取当前模式 [{mode}] 的长期记忆...")
+        import asyncio
+        asyncio.create_task(
+            self._memory_manager.trigger_summary_and_save(self.context, umo, mode, history)
+        )
     @filter.on_llm_request(
         priority=100,
         desc="拦截 LLM 请求前置钩子：根据时间和用户配置判定工作状况并剥离上下文及注入增量提示词",

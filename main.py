@@ -32,6 +32,9 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
+
+
+
 @register("character_split", "Elysium-Seeker", "Split work/rest dialog for mnemosyne memory backend", "1.0.1")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
@@ -277,7 +280,10 @@ class CharacterSplitPlugin(Star):
         if inspect.iscoroutinefunction(method):
             await asyncio.wait_for(method(*args), timeout=timeout_seconds)
             return
-        await asyncio.wait_for(asyncio.to_thread(method, *args), timeout=timeout_seconds)
+        
+        result = await asyncio.wait_for(asyncio.to_thread(method, *args), timeout=timeout_seconds)
+        if inspect.isawaitable(result):
+            await asyncio.wait_for(result, timeout=timeout_seconds)
 
     async def _trigger_mnemosyne_checkpoint(self, event: Any):
         if not self._split_config.get_bool("flush_mnemosyne_on_mode_switch", True):

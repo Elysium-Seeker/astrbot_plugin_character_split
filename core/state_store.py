@@ -13,6 +13,9 @@ except ImportError:  # pragma: no cover
     StarTools = None  # type: ignore
 
 
+
+
+
 class StateStore:
     def __init__(
         self,
@@ -39,7 +42,7 @@ class StateStore:
 
             state = await self._load_state_from_kv()
             if state is None:
-                state = self._load_state_from_file()
+                state = await self._load_state_from_file()
 
             normalized = self._normalize_state(state)
             self._state = normalized
@@ -58,7 +61,7 @@ class StateStore:
                 self._logger.warning(f"save kv state failed: {exc}")
 
         try:
-            path = self._state_file_path()
+            path = await self._state_file_path()
             path.write_text(
                 json.dumps(state_snapshot, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -123,8 +126,8 @@ class StateStore:
             self._logger.warning(f"load kv state failed: {exc}")
         return None
 
-    def _load_state_from_file(self) -> Dict[str, Any]:
-        path = self._state_file_path()
+    async def _load_state_from_file(self) -> Dict[str, Any]:
+        path = await self._state_file_path()
         if not path.exists():
             return self._default_state()
 
@@ -137,7 +140,7 @@ class StateStore:
 
         return self._default_state()
 
-    def _state_file_path(self) -> Path:
+    async def _state_file_path(self) -> Path:
         base: Optional[Path] = None
         if StarTools is not None:
             try:
@@ -147,9 +150,11 @@ class StateStore:
 
         if base is None and self._get_data_path_func is not None:
             try:
-                raw_base = self._get_data_path_func()
+                raw_base = await self._call_maybe_async(self._get_data_path_func)
                 base_root = raw_base if isinstance(raw_base, Path) else Path(str(raw_base))
-                if "plugin_data" in base_root.parts:
+                if base_root.name == self._plugin_name:
+                    base = base_root
+                elif "plugin_data" in base_root.parts:
                     base = base_root / self._plugin_name
                 else:
                     base = base_root / "plugin_data" / self._plugin_name
@@ -170,7 +175,7 @@ class StateStore:
         for key in base.keys():
             value = raw.get(key)
             if isinstance(value, dict):
-                base[key] = value
+                base[key] = deepcopy(value)
         return base
 
     def _default_state(self) -> Dict[str, Any]:

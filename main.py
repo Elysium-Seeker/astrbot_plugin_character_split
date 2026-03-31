@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.8")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.9")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -57,6 +57,7 @@ class CharacterSplitPlugin(Star):
         self._conversation_splitter = ConversationSplitter(self._state_store, logger)
         self._warned_missing_mnemosyne = False
         self._warned_missing_mnemosyne_recall = False
+        self._mode_dirty_runtime: Dict[str, Dict[str, bool]] = {}
 
     async def initialize(self):
         await self._state_store.ensure_state()
@@ -134,10 +135,11 @@ class CharacterSplitPlugin(Star):
             mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
             mnemosyne_available = await self._is_mnemosyne_available()
             require_backend = self._split_config.get_bool("require_mnemosyne_for_split", True)
+            source_mode = await self._get_current_mode_from_conversation(umo)
 
             if mnemosyne_available or not require_backend:
                 pre_switch_hook = (
-                    (lambda: self._trigger_mnemosyne_checkpoint(event)) if mnemosyne_available else None
+                    self._build_pre_switch_hook(event, umo, source_mode) if mnemosyne_available else None
                 )
                 switched = await self._conversation_splitter.ensure_mode_conversation(
                     self.context,
@@ -149,6 +151,8 @@ class CharacterSplitPlugin(Star):
                     await self._trigger_mnemosyne_recall(event, mode)
             else:
                 self._warn_missing_mnemosyne_once()
+
+            self._mark_mode_dirty(umo, mode)
 
             persona_prompt = self._persona_builder.build(mode)
             old_prompt = getattr(req, "system_prompt", "") or ""
@@ -197,9 +201,70 @@ class CharacterSplitPlugin(Star):
         )
         self._warned_missing_mnemosyne = True
 
+    def _mark_mode_dirty(self, umo: str, mode: str):
+        if not umo or mode not in MODE_SET:
+            return
+        state = self._mode_dirty_runtime.setdefault(umo, {})
+        state[mode] = True
+
+    def _clear_mode_dirty(self, umo: str, mode: str):
+        if not umo or mode not in MODE_SET:
+            return
+        state = self._mode_dirty_runtime.setdefault(umo, {})
+        state[mode] = False
+
+    def _is_mode_dirty(self, umo: str, mode: str) -> bool:
+        if not umo or mode not in MODE_SET:
+            return False
+        state = self._mode_dirty_runtime.get(umo, {})
+        return bool(state.get(mode, False))
+
+    async def _get_current_mode_from_conversation(self, umo: str) -> Optional[str]:
+        if not umo:
+            return None
+
+        conv_mgr = getattr(self.context, "conversation_manager", None)
+        if conv_mgr is None:
+            return None
+
+        try:
+            curr_cid = await conv_mgr.get_curr_conversation_id(umo)
+        except Exception:
+            return None
+
+        if not curr_cid:
+            return None
+
+        await self._state_store.ensure_state()
+        work_cid = self._state_store.get_mode_conversation_id(umo, "work")
+        rest_cid = self._state_store.get_mode_conversation_id(umo, "rest")
+        if curr_cid == work_cid:
+            return "work"
+        if curr_cid == rest_cid:
+            return "rest"
+        return None
+
+    def _build_pre_switch_hook(self, event: Any, umo: str, source_mode: Optional[str]):
+        if source_mode not in MODE_SET:
+            return lambda: self._trigger_mnemosyne_checkpoint(event)
+
+        skip_without_messages = self._split_config.get_bool("skip_checkpoint_without_messages", True)
+        if skip_without_messages and not self._is_mode_dirty(umo, source_mode):
+            logger.info(
+                f"character_split skip checkpoint: source mode '{source_mode}' has no new messages in this period"
+            )
+            return None
+
+        return lambda: self._trigger_mnemosyne_checkpoint_for_mode(event, umo, source_mode)
+
+    async def _trigger_mnemosyne_checkpoint_for_mode(self, event: Any, umo: str, source_mode: str):
+        success = await self._trigger_mnemosyne_checkpoint(event)
+        if success:
+            self._clear_mode_dirty(umo, source_mode)
+
     async def _trigger_mnemosyne_checkpoint(self, event: Any):
         if not self._split_config.get_bool("flush_mnemosyne_on_mode_switch", True):
-            return
+            return False
 
         if hasattr(event, "set_extra"):
             try:
@@ -249,7 +314,7 @@ class CharacterSplitPlugin(Star):
                             logger.info(
                                 f"character_split mnemosyne checkpoint via {method_name} succeeded"
                             )
-                            return
+                            return True
                         except TypeError:
                             continue
                         except Exception as exc:
@@ -257,6 +322,7 @@ class CharacterSplitPlugin(Star):
                                 f"character_split mnemosyne checkpoint via {method_name} failed: {exc}"
                             )
                             break
+        return False
 
     async def _trigger_mnemosyne_recall(self, event: Any, mode: str):
         if not self._split_config.get_bool("force_mnemosyne_recall_on_mode_switch", True):

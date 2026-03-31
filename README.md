@@ -43,6 +43,7 @@
 
 5. 切模式前 checkpoint（best-effort）
 - 当 work/rest 会话发生切换时，插件会先尝试触发 mnemosyne 一次即时 checkpoint。
+- 默认只在“被切走模式有新消息”时触发；若该时段没有消息，会自动跳过。
 - 这是“尽力触发”，失败不会中断对话切换流程。
 
 6. 切模式后强制 recall（best-effort）
@@ -75,6 +76,7 @@
 - `flush_mnemosyne_on_mode_switch`: 切模式前是否尝试触发一次 mnemosyne checkpoint（默认 true）
 - `require_mnemosyne_for_split`: 是否要求 mnemosyne 可用才开启分流（默认 true）
 - `force_mnemosyne_recall_on_mode_switch`: 切模式后是否尝试强制触发一次 mnemosyne 读取（默认 true）
+- `skip_checkpoint_without_messages`: 被切走模式在该时段没有新消息时，是否跳过 checkpoint（默认 true）
 - `core_persona_prompt`: 同一人格核心设定
 - `work_persona_prompt`: 工作模式增强提示词
 - `rest_persona_prompt`: 休息模式增强提示词

@@ -50,6 +50,11 @@
     "type": "bool",
     "default": true
   },
+  "skip_checkpoint_without_messages": {
+    "description": "切换模式时，如果被切走模式在该时段无新消息，则跳过 checkpoint",
+    "type": "bool",
+    "default": true
+  },
   "core_persona_prompt": {
     "description": "同一人格核心设定（work/rest 共用）",
     "type": "text",

@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.6")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.7")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -55,6 +55,7 @@ class CharacterSplitPlugin(Star):
         self._mode_resolver = ModeResolver(self._split_config, self._state_store)
         self._persona_builder = PersonaPromptBuilder(self._split_config)
         self._conversation_splitter = ConversationSplitter(self._state_store, logger)
+        self._warned_missing_mnemosyne = False
 
     async def initialize(self):
         await self._state_store.ensure_state()
@@ -79,9 +80,14 @@ class CharacterSplitPlugin(Star):
         """Show current mode status"""
         session_id, umo = self._get_session_identifiers(event)
         mode, source = await self._mode_resolver.resolve_mode(session_id, umo)
+        mnemosyne_available = await self._is_mnemosyne_available()
+        require_backend = self._split_config.get_bool("require_mnemosyne_for_split", True)
+        split_state = "enabled" if (mnemosyne_available or not require_backend) else "fallback-single-conversation"
+        backend_state = "mnemosyne(ready)" if mnemosyne_available else "mnemosyne(unavailable)"
         text = (
             f"mode: {mode} ({source})\n"
-            "memory_backend: mnemosyne\n"
+            f"memory_backend: {backend_state}\n"
+            f"split_state: {split_state}\n"
             f"local_time: {self._split_config.current_time_desc()}\n"
             f"session_id: {session_id or '-'}\n"
             f"umo: {umo or '-'}"
@@ -125,12 +131,21 @@ class CharacterSplitPlugin(Star):
         try:
             session_id, umo = self._get_session_identifiers(event)
             mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
-            await self._conversation_splitter.ensure_mode_conversation(
-                self.context,
-                event,
-                mode,
-                pre_switch_hook=lambda: self._trigger_mnemosyne_checkpoint(event),
-            )
+            mnemosyne_available = await self._is_mnemosyne_available()
+            require_backend = self._split_config.get_bool("require_mnemosyne_for_split", True)
+
+            if mnemosyne_available or not require_backend:
+                pre_switch_hook = (
+                    (lambda: self._trigger_mnemosyne_checkpoint(event)) if mnemosyne_available else None
+                )
+                await self._conversation_splitter.ensure_mode_conversation(
+                    self.context,
+                    event,
+                    mode,
+                    pre_switch_hook=pre_switch_hook,
+                )
+            else:
+                self._warn_missing_mnemosyne_once()
 
             persona_prompt = self._persona_builder.build(mode)
             old_prompt = getattr(req, "system_prompt", "") or ""
@@ -138,6 +153,46 @@ class CharacterSplitPlugin(Star):
             req.system_prompt = merged
         except Exception as exc:
             logger.error(f"character_split on_llm_request failed: {exc}")
+
+    async def _get_loaded_stars(self) -> List[Any]:
+        get_all_stars = getattr(self.context, "get_all_stars", None)
+        if not callable(get_all_stars):
+            return []
+
+        stars = get_all_stars()
+        if hasattr(stars, "__await__"):
+            stars = await stars
+        stars = stars or []
+        if isinstance(stars, dict):
+            return list(stars.values())
+        if isinstance(stars, list):
+            return stars
+        try:
+            return list(stars)
+        except Exception:
+            return []
+
+    def _is_mnemosyne_star(self, star: Any) -> bool:
+        star_name = str(getattr(star, "name", "") or "").lower()
+        root_name = str(getattr(star, "root_dir_name", "") or "").lower()
+        return "mnemosyne" in star_name or "mnemosyne" in root_name
+
+    async def _is_mnemosyne_available(self) -> bool:
+        stars = await self._get_loaded_stars()
+        for star in stars:
+            if self._is_mnemosyne_star(star):
+                self._warned_missing_mnemosyne = False
+                return True
+        return False
+
+    def _warn_missing_mnemosyne_once(self):
+        if self._warned_missing_mnemosyne:
+            return
+        logger.warning(
+            "character_split: mnemosyne backend unavailable. Split is temporarily disabled to preserve single-conversation context. "
+            "Set require_mnemosyne_for_split=false to force split without mnemosyne."
+        )
+        self._warned_missing_mnemosyne = True
 
     async def _trigger_mnemosyne_checkpoint(self, event: Any):
         if not self._split_config.get_bool("flush_mnemosyne_on_mode_switch", True):
@@ -149,16 +204,7 @@ class CharacterSplitPlugin(Star):
             except Exception:
                 pass
 
-        get_all_stars = getattr(self.context, "get_all_stars", None)
-        if not callable(get_all_stars):
-            return
-
-        stars = get_all_stars()
-        if hasattr(stars, "__await__"):
-            stars = await stars
-        stars = stars or []
-        if isinstance(stars, dict):
-            stars = list(stars.values())
+        stars = await self._get_loaded_stars()
 
         candidate_methods = [
             "checkpoint_now",
@@ -170,9 +216,7 @@ class CharacterSplitPlugin(Star):
         ]
 
         for star in stars:
-            star_name = str(getattr(star, "name", "") or "").lower()
-            root_name = str(getattr(star, "root_dir_name", "") or "").lower()
-            if "mnemosyne" not in star_name and "mnemosyne" not in root_name:
+            if not self._is_mnemosyne_star(star):
                 continue
 
             candidates = []

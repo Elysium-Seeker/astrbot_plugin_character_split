@@ -45,6 +45,10 @@
 - 当 work/rest 会话发生切换时，插件会先尝试触发 mnemosyne 一次即时 checkpoint。
 - 这是“尽力触发”，失败不会中断对话切换流程。
 
+6. 后端不可用时的降级
+- 若 mnemosyne 未加载或不可用，插件会打 warning 日志，并默认关闭 work/rest 分流。
+- 此时回退为单会话，优先保证上下文连续性，避免对话被拆散。
+
 ## 指令
 
 - `/mode help` 查看指令帮助
@@ -64,6 +68,7 @@
 - `work_sessions`: 工作模式白名单（时间规则之后的补充分流）
 - `rest_sessions`: 休息模式白名单（时间规则之后的补充分流）
 - `flush_mnemosyne_on_mode_switch`: 切模式前是否尝试触发一次 mnemosyne checkpoint（默认 true）
+- `require_mnemosyne_for_split`: 是否要求 mnemosyne 可用才开启分流（默认 true）
 - `core_persona_prompt`: 同一人格核心设定
 - `work_persona_prompt`: 工作模式增强提示词
 - `rest_persona_prompt`: 休息模式增强提示词

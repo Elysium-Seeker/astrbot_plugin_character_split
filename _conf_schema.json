@@ -40,6 +40,11 @@
     "type": "bool",
     "default": true
   },
+  "require_mnemosyne_for_split": {
+    "description": "要求 mnemosyne 可用才启用 work/rest 分流；否则降级为单会话以保上下文",
+    "type": "bool",
+    "default": true
+  },
   "core_persona_prompt": {
     "description": "同一人格核心设定（work/rest 共用）",
     "type": "text",

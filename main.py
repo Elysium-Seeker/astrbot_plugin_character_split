@@ -34,7 +34,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.api.star import StarTools
 
-@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.6")
+@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.7")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)

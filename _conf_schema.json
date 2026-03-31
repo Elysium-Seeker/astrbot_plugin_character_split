@@ -45,6 +45,11 @@
     "type": "bool",
     "default": true
   },
+  "force_mnemosyne_recall_on_mode_switch": {
+    "description": "发生模式切换后，尽力强制触发一次 mnemosyne memory 读取/注入",
+    "type": "bool",
+    "default": true
+  },
   "core_persona_prompt": {
     "description": "同一人格核心设定（work/rest 共用）",
     "type": "text",

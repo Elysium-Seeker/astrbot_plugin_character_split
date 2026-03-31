@@ -17,11 +17,11 @@ class ConversationSplitter:
     ):
         conv_mgr = getattr(context, "conversation_manager", None)
         if conv_mgr is None:
-            return
+            return False
 
         umo = getattr(event, "unified_msg_origin", "")
         if not umo:
-            return
+            return False
 
         await self._state_store.ensure_state()
         target_cid = self._state_store.get_mode_conversation_id(umo, mode)
@@ -36,7 +36,8 @@ class ConversationSplitter:
                 if curr_cid != target_cid:
                     await self._run_pre_switch_hook(pre_switch_hook)
                     await conv_mgr.switch_conversation(umo, target_cid)
-                return
+                    return True
+                return False
             except Exception:
                 self._state_store.remove_mode_conversation_id(umo, mode)
 
@@ -48,10 +49,14 @@ class ConversationSplitter:
         if new_cid:
             try:
                 await conv_mgr.switch_conversation(umo, new_cid)
+                switched = True
             except Exception as exc:
                 self._logger.warning(f"switch_conversation to new mode conversation failed: {exc}")
+                switched = False
             self._state_store.set_mode_conversation_id(umo, mode, new_cid)
             await self._state_store.save_state()
+            return switched
+        return False
 
     async def _run_pre_switch_hook(self, hook: Any):
         if hook is None:

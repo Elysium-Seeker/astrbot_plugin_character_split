@@ -44,7 +44,7 @@ except Exception:  # pragma: no cover
     )
 
 
-@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.7")
+@register("character_split", "Copilot", "Split work/rest dialog for mnemosyne memory backend", "0.1.8")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -56,6 +56,7 @@ class CharacterSplitPlugin(Star):
         self._persona_builder = PersonaPromptBuilder(self._split_config)
         self._conversation_splitter = ConversationSplitter(self._state_store, logger)
         self._warned_missing_mnemosyne = False
+        self._warned_missing_mnemosyne_recall = False
 
     async def initialize(self):
         await self._state_store.ensure_state()
@@ -138,12 +139,14 @@ class CharacterSplitPlugin(Star):
                 pre_switch_hook = (
                     (lambda: self._trigger_mnemosyne_checkpoint(event)) if mnemosyne_available else None
                 )
-                await self._conversation_splitter.ensure_mode_conversation(
+                switched = await self._conversation_splitter.ensure_mode_conversation(
                     self.context,
                     event,
                     mode,
                     pre_switch_hook=pre_switch_hook,
                 )
+                if switched and mnemosyne_available:
+                    await self._trigger_mnemosyne_recall(event, mode)
             else:
                 self._warn_missing_mnemosyne_once()
 
@@ -254,6 +257,76 @@ class CharacterSplitPlugin(Star):
                                 f"character_split mnemosyne checkpoint via {method_name} failed: {exc}"
                             )
                             break
+
+    async def _trigger_mnemosyne_recall(self, event: Any, mode: str):
+        if not self._split_config.get_bool("force_mnemosyne_recall_on_mode_switch", True):
+            return
+
+        if hasattr(event, "set_extra"):
+            try:
+                event.set_extra("mnemosyne_mode_switch_force_recall", True)
+                event.set_extra("mnemosyne_target_mode", mode)
+            except Exception:
+                pass
+
+        stars = await self._get_loaded_stars()
+        candidate_methods = [
+            "recall_now",
+            "reload_memory",
+            "refresh_memory",
+            "inject_memory_now",
+            "retrieve_memory",
+            "retrieve_memories",
+            "force_recall",
+        ]
+
+        for star in stars:
+            if not self._is_mnemosyne_star(star):
+                continue
+
+            candidates = []
+            for attr in ("star_obj", "plugin", "instance", "star", "star_cls"):
+                obj = getattr(star, attr, None)
+                if obj is not None:
+                    candidates.append(obj)
+            candidates.append(star)
+
+            seen_ids = set()
+            for plugin_obj in candidates:
+                obj_id = id(plugin_obj)
+                if obj_id in seen_ids:
+                    continue
+                seen_ids.add(obj_id)
+
+                for method_name in candidate_methods:
+                    method = getattr(plugin_obj, method_name, None)
+                    if not callable(method):
+                        continue
+
+                    for args in ((event, mode), (event,), (mode,), tuple()):
+                        try:
+                            result = method(*args)
+                            if hasattr(result, "__await__"):
+                                await result
+                            self._warned_missing_mnemosyne_recall = False
+                            logger.info(
+                                f"character_split mnemosyne recall via {method_name} succeeded"
+                            )
+                            return
+                        except TypeError:
+                            continue
+                        except Exception as exc:
+                            logger.warning(
+                                f"character_split mnemosyne recall via {method_name} failed: {exc}"
+                            )
+                            break
+
+        if not self._warned_missing_mnemosyne_recall:
+            logger.warning(
+                "character_split: mode switched but no mnemosyne recall API matched. "
+                "Set force_mnemosyne_recall_on_mode_switch=false if you do not need forced recall."
+            )
+            self._warned_missing_mnemosyne_recall = True
 
     def _create_state_store(self) -> StateStore:
         return StateStore(

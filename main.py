@@ -79,7 +79,7 @@ class CharacterSplitPlugin(Star):
         mode, source = await self._mode_resolver.resolve_mode(session_id, umo)
         
         # count memory items
-        memories = await self._memory_manager.get_recent_memories(umo, mode, limit=100)
+        memories = await self._memory_manager.get_recent_memories(umo, mode, limit=100, strategy="recent")
         mem_count = len(memories)
 
         text = (
@@ -129,7 +129,7 @@ class CharacterSplitPlugin(Star):
         """List current memories"""
         session_id, umo = self._get_session_identifiers(event)
         mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
-        memories = await self._memory_manager.get_recent_memories(umo, mode, limit=20)
+        memories = await self._memory_manager.get_recent_memories(umo, mode, limit=20, strategy="recent")
         
         if not memories:
             yield event.plain_result(f"当前模式 [{mode}] 暂无长期记忆。")

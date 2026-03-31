@@ -52,18 +52,50 @@ class MemoryManager:
             self.logger.error(f"Failed to add memory: {e}")
             return -1
 
-    async def get_recent_memories(self, umo: str, mode: str, limit: int = 5) -> List[Dict[str, Any]]:
+    async def get_recent_memories(self, umo: str, mode: str, limit: int = 5, strategy: str = "hybrid") -> List[Dict[str, Any]]:
         def _get():
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT id, title, content, timestamp, importance FROM mode_memories WHERE umo = ? AND mode = ? ORDER BY importance DESC, id DESC LIMIT ?",
-                    (umo, mode, limit)
-                )
-                return [{"id": r[0], "title": r[1], "content": r[2], "timestamp": r[3], "importance": r[4]} for r in cursor.fetchall()]
+                if strategy == "hybrid":
+                    # 1. 混合流：获取高权重记忆 (占 limit 的 60%)
+                    imp_limit = max(1, limit - (limit // 2))
+                    cursor.execute(
+                        "SELECT id, title, content, timestamp, importance FROM mode_memories WHERE umo = ? AND mode = ? ORDER BY importance DESC, id DESC LIMIT ?",
+                        (umo, mode, imp_limit)
+                    )
+                    imp_rows = cursor.fetchall()
+                    imp_ids = [r[0] for r in imp_rows]
+                    
+                    # 2. 获取最新近期记忆 (填补剩余的额度，不重复)
+                    rec_limit = limit - len(imp_rows)
+                    rec_rows = []
+                    if rec_limit > 0:
+                        query = "SELECT id, title, content, timestamp, importance FROM mode_memories WHERE umo = ? AND mode = ?"
+                        params = [umo, mode]
+                        if imp_ids:
+                            placeholders = ','.join('?' for _ in imp_ids)
+                            query += f" AND id NOT IN ({placeholders})"
+                            params.extend(imp_ids)
+                        query += " ORDER BY id DESC LIMIT ?"
+                        params.append(rec_limit)
+                        cursor.execute(query, tuple(params))
+                        rec_rows = cursor.fetchall()
+                        
+                    all_rows = imp_rows + rec_rows
+                    res = [{"id": r[0], "title": r[1], "content": r[2], "timestamp": r[3], "importance": r[4]} for r in all_rows]
+                    res.sort(key=lambda x: x["id"]) # 最终统一按时间线顺序给到 LLM
+                    return res
+                else:
+                    # 默认列表流：纯按时间倒序（用于列表展示）
+                    cursor.execute(
+                        "SELECT id, title, content, timestamp, importance FROM mode_memories WHERE umo = ? AND mode = ? ORDER BY id DESC LIMIT ?",
+                        (umo, mode, limit)
+                    )
+                    res = [{"id": r[0], "title": r[1], "content": r[2], "timestamp": r[3], "importance": r[4]} for r in cursor.fetchall()]
+                    res.sort(key=lambda x: x["id"])
+                    return res
         try:
-            items = await asyncio.to_thread(_get)
-            return items # Already sorted by SQL DESC
+            return await asyncio.to_thread(_get)
         except Exception as e:
             self.logger.error(f"Failed to get memory: {e}")
             return []

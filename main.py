@@ -1,6 +1,7 @@
 # pyright: reportMissingImports=false
 
-from threading import Lock
+import asyncio
+import inspect
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -66,7 +67,7 @@ class CharacterSplitPlugin(Star):
         self._conversation_splitter = ConversationSplitter(self._state_store, logger)
         self._warned_missing_mnemosyne = False
         self._warned_missing_mnemosyne_recall = False
-        self._runtime_state_lock = Lock()
+        self._runtime_state_lock = asyncio.Lock()
         self._mode_dirty_runtime: Dict[str, Dict[str, bool]] = {}
 
     async def initialize(self):
@@ -79,7 +80,7 @@ class CharacterSplitPlugin(Star):
         "mode",
         desc="工作/休息模式控制台",
     )
-    def mode(self):
+    def mode(self, event: AstrMessageEvent):
         """Mode command group"""
 
     @mode.command("help", desc="查看 mode 指令帮助面板")
@@ -148,9 +149,7 @@ class CharacterSplitPlugin(Star):
             source_mode = await self._get_current_mode_from_conversation(umo)
 
             if mnemosyne_available or not require_backend:
-                pre_switch_hook = (
-                    self._build_pre_switch_hook(event, umo, source_mode) if mnemosyne_available else None
-                )
+                pre_switch_hook = await self._build_pre_switch_hook(event, umo, source_mode) if mnemosyne_available else None
                 switched = await self._conversation_splitter.ensure_mode_conversation(
                     self.context,
                     event,
@@ -160,9 +159,9 @@ class CharacterSplitPlugin(Star):
                 if switched and mnemosyne_available:
                     await self._trigger_mnemosyne_recall(event, mode)
             else:
-                self._warn_missing_mnemosyne_once()
+                await self._warn_missing_mnemosyne_once()
 
-            self._mark_mode_dirty(umo, mode)
+            await self._mark_mode_dirty(umo, mode)
 
             persona_prompt = self._persona_builder.build(mode)
             old_prompt = getattr(req, "system_prompt", "") or ""
@@ -170,6 +169,7 @@ class CharacterSplitPlugin(Star):
             req.system_prompt = merged
         except Exception:
             logger.exception("character_split on_llm_request failed")
+            raise
 
     async def _get_loaded_stars(self) -> List[Any]:
         get_all_stars = getattr(self.context, "get_all_stars", None)
@@ -198,13 +198,13 @@ class CharacterSplitPlugin(Star):
         stars = await self._get_loaded_stars()
         for star in stars:
             if self._is_mnemosyne_star(star):
-                with self._runtime_state_lock:
+                async with self._runtime_state_lock:
                     self._warned_missing_mnemosyne = False
                 return True
         return False
 
-    def _warn_missing_mnemosyne_once(self):
-        with self._runtime_state_lock:
+    async def _warn_missing_mnemosyne_once(self):
+        async with self._runtime_state_lock:
             if self._warned_missing_mnemosyne:
                 return
             logger.warning(
@@ -213,24 +213,24 @@ class CharacterSplitPlugin(Star):
             )
             self._warned_missing_mnemosyne = True
 
-    def _mark_mode_dirty(self, umo: str, mode: str):
+    async def _mark_mode_dirty(self, umo: str, mode: str):
         if not umo or mode not in MODE_SET:
             return
-        with self._runtime_state_lock:
+        async with self._runtime_state_lock:
             state = self._mode_dirty_runtime.setdefault(umo, {})
             state[mode] = True
 
-    def _clear_mode_dirty(self, umo: str, mode: str):
+    async def _clear_mode_dirty(self, umo: str, mode: str):
         if not umo or mode not in MODE_SET:
             return
-        with self._runtime_state_lock:
+        async with self._runtime_state_lock:
             state = self._mode_dirty_runtime.setdefault(umo, {})
             state[mode] = False
 
-    def _is_mode_dirty(self, umo: str, mode: str) -> bool:
+    async def _is_mode_dirty(self, umo: str, mode: str) -> bool:
         if not umo or mode not in MODE_SET:
             return False
-        with self._runtime_state_lock:
+        async with self._runtime_state_lock:
             state = self._mode_dirty_runtime.get(umo, {})
             return bool(state.get(mode, False))
 
@@ -259,12 +259,12 @@ class CharacterSplitPlugin(Star):
             return "rest"
         return None
 
-    def _build_pre_switch_hook(self, event: Any, umo: str, source_mode: Optional[str]):
+    async def _build_pre_switch_hook(self, event: Any, umo: str, source_mode: Optional[str]):
         if source_mode not in MODE_SET:
             return lambda: self._trigger_mnemosyne_checkpoint(event)
 
         skip_without_messages = self._split_config.get_bool("skip_checkpoint_without_messages", True)
-        if skip_without_messages and not self._is_mode_dirty(umo, source_mode):
+        if skip_without_messages and not await self._is_mode_dirty(umo, source_mode):
             logger.info(
                 f"character_split skip checkpoint: source mode '{source_mode}' has no new messages in this period"
             )
@@ -275,7 +275,13 @@ class CharacterSplitPlugin(Star):
     async def _trigger_mnemosyne_checkpoint_for_mode(self, event: Any, umo: str, source_mode: str):
         success = await self._trigger_mnemosyne_checkpoint(event)
         if success:
-            self._clear_mode_dirty(umo, source_mode)
+            await self._clear_mode_dirty(umo, source_mode)
+
+    async def _invoke_candidate_method(self, method: Any, args: Tuple[Any, ...], timeout_seconds: float = 8.0):
+        if inspect.iscoroutinefunction(method):
+            await asyncio.wait_for(method(*args), timeout=timeout_seconds)
+            return
+        await asyncio.wait_for(asyncio.to_thread(method, *args), timeout=timeout_seconds)
 
     async def _trigger_mnemosyne_checkpoint(self, event: Any):
         if not self._split_config.get_bool("flush_mnemosyne_on_mode_switch", True):
@@ -323,15 +329,18 @@ class CharacterSplitPlugin(Star):
 
                     for args in ((event,), tuple()):
                         try:
-                            result = method(*args)
-                            if hasattr(result, "__await__"):
-                                await result
+                            await self._invoke_candidate_method(method, args)
                             logger.info(
                                 f"character_split mnemosyne checkpoint via {method_name} succeeded"
                             )
                             return True
                         except TypeError:
                             continue
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"character_split mnemosyne checkpoint via {method_name} timed out"
+                            )
+                            break
                         except Exception as exc:
                             logger.warning(
                                 f"character_split mnemosyne checkpoint via {method_name} failed: {exc}"
@@ -386,10 +395,8 @@ class CharacterSplitPlugin(Star):
 
                     for args in ((event, mode), (event,), (mode,), tuple()):
                         try:
-                            result = method(*args)
-                            if hasattr(result, "__await__"):
-                                await result
-                            with self._runtime_state_lock:
+                            await self._invoke_candidate_method(method, args)
+                            async with self._runtime_state_lock:
                                 self._warned_missing_mnemosyne_recall = False
                             logger.info(
                                 f"character_split mnemosyne recall via {method_name} succeeded"
@@ -397,13 +404,18 @@ class CharacterSplitPlugin(Star):
                             return
                         except TypeError:
                             continue
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"character_split mnemosyne recall via {method_name} timed out"
+                            )
+                            break
                         except Exception as exc:
                             logger.warning(
                                 f"character_split mnemosyne recall via {method_name} failed: {exc}"
                             )
                             break
 
-        with self._runtime_state_lock:
+        async with self._runtime_state_lock:
             if not self._warned_missing_mnemosyne_recall:
                 logger.warning(
                     "character_split: mode switched but no mnemosyne recall API matched. "

@@ -1,4 +1,3 @@
-import inspect
 from typing import Any, Optional
 
 from .state_store import StateStore
@@ -79,29 +78,33 @@ class ConversationSplitter:
             self._logger.error("new_conversation method not found on conversation_manager")
             return None
 
-        call_args = []
-        call_kwargs = {}
+        result = None
+        last_exc: Optional[Exception] = None
 
         try:
-            signature = inspect.signature(method)
-            params = signature.parameters
-            has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-            has_unified = "unified_msg_origin" in params
-            has_title = "title" in params
-
-            if has_unified or has_kwargs:
-                call_kwargs["unified_msg_origin"] = umo
-            else:
-                call_args.append(umo)
-
-            if has_title or has_kwargs:
-                call_kwargs["title"] = title
-        except (TypeError, ValueError):
-            # Fallback: prioritize explicit keyword call when introspection fails.
-            call_kwargs = {"unified_msg_origin": umo, "title": title}
-
-        try:
-            return await method(*call_args, **call_kwargs)
+            result = method(unified_msg_origin=umo, title=title)
         except Exception as exc:
-            self._logger.error(f"new_conversation failed: {exc}")
+            last_exc = exc
+
+        if result is None:
+            try:
+                result = method(umo, title=title)
+            except Exception as exc:
+                last_exc = exc
+
+        if result is None and last_exc is not None:
+            self._logger.error(f"new_conversation failed: {last_exc}")
             return None
+
+        if hasattr(result, "__await__"):
+            try:
+                result = await result
+            except Exception as exc:
+                self._logger.error(f"new_conversation await failed: {exc}")
+                return None
+
+        if isinstance(result, str):
+            return result
+
+        self._logger.error("new_conversation returned unexpected result type")
+        return None

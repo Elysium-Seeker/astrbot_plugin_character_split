@@ -4,7 +4,6 @@ import asyncio
 import json
 from copy import deepcopy
 from pathlib import Path
-from threading import RLock
 from typing import Any, Dict, Optional
 
 try:
@@ -31,7 +30,6 @@ class StateStore:
         self._put_kv_data_func = put_kv_data_func
         self._state: Optional[Dict[str, Any]] = None
         self._state_lock = asyncio.Lock()
-        self._state_data_lock = RLock()
 
     async def ensure_state(self) -> Dict[str, Any]:
         async with self._state_lock:
@@ -43,16 +41,14 @@ class StateStore:
                 state = self._load_state_from_file()
 
             normalized = self._normalize_state(state)
-            with self._state_data_lock:
-                self._state = normalized
-                return self._state
+            self._state = normalized
+            return self._state
 
     async def save_state(self):
         async with self._state_lock:
-            with self._state_data_lock:
-                if self._state is None:
-                    return
-                state_snapshot = deepcopy(self._state)
+            if self._state is None:
+                return
+            state_snapshot = deepcopy(self._state)
 
         if self._put_kv_data_func is not None:
             try:
@@ -70,49 +66,43 @@ class StateStore:
             self._logger.warning(f"save file state failed: {exc}")
 
     def get_session_override(self, key: str) -> Optional[str]:
-        with self._state_data_lock:
-            if not self._state or not key:
-                return None
-            value = self._state["session_overrides"].get(key)
+        if not self._state or not key:
+            return None
+        value = self._state["session_overrides"].get(key)
         if isinstance(value, str):
             return value
         return None
 
     def set_session_override(self, key: str, mode: str):
-        with self._state_data_lock:
-            if not self._state or not key:
-                return
-            self._state["session_overrides"][key] = mode
+        if not self._state or not key:
+            return
+        self._state["session_overrides"][key] = mode
 
     def clear_session_override(self, key: str):
-        with self._state_data_lock:
-            if not self._state or not key:
-                return
-            self._state["session_overrides"].pop(key, None)
+        if not self._state or not key:
+            return
+        self._state["session_overrides"].pop(key, None)
 
     def get_mode_conversation_id(self, umo: str, mode: str) -> Optional[str]:
-        with self._state_data_lock:
-            if not self._state or not umo:
-                return None
-            session_map = self._state["session_conversations"].get(umo, {})
-            value = session_map.get(mode)
+        if not self._state or not umo:
+            return None
+        session_map = self._state["session_conversations"].get(umo, {})
+        value = session_map.get(mode)
         if isinstance(value, str):
             return value
         return None
 
     def set_mode_conversation_id(self, umo: str, mode: str, conversation_id: str):
-        with self._state_data_lock:
-            if not self._state or not umo:
-                return
-            session_map = self._state["session_conversations"].setdefault(umo, {})
-            session_map[mode] = conversation_id
+        if not self._state or not umo:
+            return
+        session_map = self._state["session_conversations"].setdefault(umo, {})
+        session_map[mode] = conversation_id
 
     def remove_mode_conversation_id(self, umo: str, mode: str):
-        with self._state_data_lock:
-            if not self._state or not umo:
-                return
-            session_map = self._state["session_conversations"].setdefault(umo, {})
-            session_map.pop(mode, None)
+        if not self._state or not umo:
+            return
+        session_map = self._state["session_conversations"].setdefault(umo, {})
+        session_map.pop(mode, None)
 
     async def _load_state_from_kv(self) -> Optional[Dict[str, Any]]:
         if self._get_kv_data_func is None:
@@ -141,28 +131,29 @@ class StateStore:
         return self._default_state()
 
     def _state_file_path(self) -> Path:
+        base: Optional[Path] = None
         if StarTools is not None:
             try:
-                base = Path(str(StarTools.get_data_dir())) / self._plugin_name
+                base = Path(str(StarTools.get_data_dir()))
             except Exception as exc:
                 self._logger.warning(f"resolve data dir from StarTools failed: {exc}")
-                base = self._fallback_data_dir()
-        elif self._get_data_path_func is not None:
+
+        if base is None and self._get_data_path_func is not None:
             try:
                 raw_base = self._get_data_path_func()
                 base_root = raw_base if isinstance(raw_base, Path) else Path(str(raw_base))
                 base = base_root / "plugin_data" / self._plugin_name
             except Exception as exc:
                 self._logger.warning(f"resolve data dir from get_data_path_func failed: {exc}")
-                base = self._fallback_data_dir()
-        else:
-            base = self._fallback_data_dir()
+
+        if base is None:
+            base = Path.home() / ".astrbot" / "plugin_data" / self._plugin_name
+            self._logger.warning(
+                "StarTools is unavailable; using fallback data path under user home directory."
+            )
 
         base.mkdir(parents=True, exist_ok=True)
         return base / "state.json"
-
-    def _fallback_data_dir(self) -> Path:
-        return Path.cwd() / ".astrbot_plugin_data" / self._plugin_name
 
     def _normalize_state(self, raw: Any) -> Dict[str, Any]:
         base = self._default_state()

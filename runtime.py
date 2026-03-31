@@ -1,6 +1,5 @@
 # pyright: reportMissingImports=false
 
-import logging
 from typing import Any
 
 try:
@@ -9,8 +8,20 @@ try:
     from astrbot.api.provider import ProviderRequest
     from astrbot.api.star import Context, Star, register
 except ImportError:  # pragma: no cover
-    logger = logging.getLogger("astrbot_plugin_character_split.runtime")
-    logger.addHandler(logging.NullHandler())
+    class _DummyLogger:
+        def info(self, _msg: str):
+            return None
+
+        def warning(self, _msg: str):
+            return None
+
+        def error(self, _msg: str):
+            return None
+
+        def exception(self, _msg: str):
+            return None
+
+    logger = _DummyLogger()
 
     class _DummyCommandGroup:
         @staticmethod

@@ -119,6 +119,13 @@ class MemoryManager:
         session_limit: int = 5,
     ) -> Dict[str, List[Dict[str, Any]]]:
         def _get() -> Dict[str, List[Dict[str, Any]]]:
+            def _safe_limit(value: Any) -> int:
+                try:
+                    num = int(value)
+                except (TypeError, ValueError):
+                    num = 0
+                return max(0, num)
+
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 layers: Dict[str, List[Dict[str, Any]]] = {
@@ -127,43 +134,50 @@ class MemoryManager:
                     SCOPE_SESSION: [],
                 }
 
-                cursor.execute(
-                    """
-                    SELECT id, title, content, timestamp, importance, scope
-                    FROM mode_memories
-                    WHERE umo = ? AND scope = ?
-                    ORDER BY importance DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (umo, SCOPE_GLOBAL, max(1, int(global_limit))),
-                )
-                layers[SCOPE_GLOBAL] = [self._row_to_memory(row) for row in cursor.fetchall()]
+                global_size = _safe_limit(global_limit)
+                mode_size = _safe_limit(mode_limit)
+                session_size = _safe_limit(session_limit)
 
-                cursor.execute(
-                    """
-                    SELECT id, title, content, timestamp, importance, scope
-                    FROM mode_memories
-                    WHERE umo = ? AND mode = ? AND scope = ?
-                    ORDER BY importance DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (umo, mode, SCOPE_MODE, max(1, int(mode_limit))),
-                )
-                layers[SCOPE_MODE] = [self._row_to_memory(row) for row in cursor.fetchall()]
+                if global_size > 0:
+                    cursor.execute(
+                        """
+                        SELECT id, title, content, timestamp, importance, scope
+                        FROM mode_memories
+                        WHERE umo = ? AND scope = ?
+                        ORDER BY importance DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (umo, SCOPE_GLOBAL, global_size),
+                    )
+                    layers[SCOPE_GLOBAL] = [self._row_to_memory(row) for row in cursor.fetchall()]
 
-                cursor.execute(
-                    """
-                    SELECT id, title, content, timestamp, importance, scope
-                    FROM mode_memories
-                    WHERE umo = ? AND mode = ? AND scope = ?
-                    ORDER BY id DESC
-                    LIMIT ?
-                    """,
-                    (umo, mode, SCOPE_SESSION, max(1, int(session_limit))),
-                )
-                session_rows = cursor.fetchall()
-                session_rows.sort(key=lambda row: row[0])
-                layers[SCOPE_SESSION] = [self._row_to_memory(row) for row in session_rows]
+                if mode_size > 0:
+                    cursor.execute(
+                        """
+                        SELECT id, title, content, timestamp, importance, scope
+                        FROM mode_memories
+                        WHERE umo = ? AND mode = ? AND scope = ?
+                        ORDER BY importance DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (umo, mode, SCOPE_MODE, mode_size),
+                    )
+                    layers[SCOPE_MODE] = [self._row_to_memory(row) for row in cursor.fetchall()]
+
+                if session_size > 0:
+                    cursor.execute(
+                        """
+                        SELECT id, title, content, timestamp, importance, scope
+                        FROM mode_memories
+                        WHERE umo = ? AND mode = ? AND scope = ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (umo, mode, SCOPE_SESSION, session_size),
+                    )
+                    session_rows = cursor.fetchall()
+                    session_rows.sort(key=lambda row: row[0])
+                    layers[SCOPE_SESSION] = [self._row_to_memory(row) for row in session_rows]
 
                 return layers
 
@@ -344,9 +358,53 @@ class MemoryManager:
         return cleaned.strip()
 
     @staticmethod
+    def _extract_text(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                        continue
+                    content = item.get("content")
+                    if isinstance(content, str):
+                        parts.append(content)
+            return " ".join(parts)
+
+        if isinstance(value, dict):
+            for key in ("text", "content", "message"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+
+        return ""
+
+    @staticmethod
+    def _normalize_text_fragment(text: str) -> str:
+        return " ".join((text or "").strip().split())
+
+    @staticmethod
+    def _truncate_text(text: str, max_chars: int) -> str:
+        cleaned = (text or "").strip()
+        if max_chars <= 0 or len(cleaned) <= max_chars:
+            return cleaned
+        if max_chars <= 3:
+            return cleaned[:max_chars]
+        return cleaned[: max_chars - 3].rstrip() + "..."
+
+    @staticmethod
     def _build_history_text(
         history_contexts: List[Dict[str, Any]],
         history_limit: Optional[int] = 40,
+        message_char_limit: int = 220,
+        total_char_limit: int = 4800,
     ) -> str:
         if history_limit is None:
             source = history_contexts
@@ -354,12 +412,35 @@ class MemoryManager:
             safe_limit = max(1, int(history_limit))
             source = history_contexts[-safe_limit:]
 
+        safe_message_chars = max(40, int(message_char_limit))
+        safe_total_chars = max(400, int(total_char_limit))
+
         parts: List[str] = []
+        total_chars = 0
         for msg in source:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                parts.append(f"{role}: {content}")
+            role = str(msg.get("role", "unknown")).strip().lower()
+            if role not in {"system", "user", "assistant"}:
+                continue
+
+            raw_content = msg.get("content", "")
+            content = MemoryManager._extract_text(raw_content)
+            content = MemoryManager._normalize_text_fragment(content)
+            if not content:
+                continue
+            content = MemoryManager._truncate_text(content, safe_message_chars)
+
+            line = f"{role}: {content}"
+            projected = total_chars + len(line) + 1
+            if projected > safe_total_chars:
+                remaining = safe_total_chars - total_chars
+                if remaining < 20:
+                    break
+                parts.append(MemoryManager._truncate_text(line, remaining))
+                break
+
+            parts.append(line)
+            total_chars = projected
+
         return "\n".join(parts)
 
     @staticmethod
@@ -401,6 +482,8 @@ class MemoryManager:
         mode: str,
         history_contexts: List[Dict[str, Any]],
         history_limit: Optional[int] = 40,
+        message_char_limit: int = 220,
+        total_char_limit: int = 4800,
     ):
         if not history_contexts:
             return
@@ -412,17 +495,19 @@ class MemoryManager:
                 return
 
             system_prompt = (
-                "你是一个三层记忆管理器。请从对话里提取有价值事实并按 scope 分类。\n"
-                "scope 可选值：global/mode/session。\n"
-                "global: 通用偏好或长期身份特征，importance 建议 8-10。\n"
-                "mode: 工作或休息模式下的长期规则，importance 建议 5-8。\n"
-                "session: 当前任务的短期上下文，importance 建议 1-5。\n"
-                "仅输出 JSON 数组，不要任何多余文本。\n"
-                "数组元素格式：{\"scope\":\"global\",\"title\":\"...\",\"content\":\"...\",\"importance\":8}"
+                "你是记忆提取器。仅提取可复用事实，忽略寒暄、重复和一次性细节。\n"
+                "按 scope 输出 JSON 数组，scope 只能是 global/mode/session。\n"
+                "importance 为 1-10 的整数，只输出 JSON，不要解释。\n"
+                "元素格式：{\"scope\":\"global\",\"title\":\"...\",\"content\":\"...\",\"importance\":8}"
             )
 
-            history_text = self._build_history_text(history_contexts, history_limit)
-            if not history_text:
+            history_text = self._build_history_text(
+                history_contexts,
+                history_limit,
+                message_char_limit,
+                total_char_limit,
+            )
+            if not history_text or len(history_text) < 20:
                 return
             response = await context.llm_generate(
                 chat_provider_id=provider_id,
@@ -472,7 +557,7 @@ class MemoryManager:
         umo: str,
         mode: str,
         retain_count: int = 60,
-        source_limit: Optional[int] = 300,
+        source_limit: Optional[int] = 180,
     ) -> Dict[str, Any]:
         before_total = await self.get_memory_total(umo)
         if before_total <= 0:
@@ -491,18 +576,29 @@ class MemoryManager:
             safe_retain = max(5, int(retain_count))
             lines: List[str] = []
             for item in source:
+                title = self._truncate_text(
+                    self._normalize_text_fragment(str(item.get("title", ""))),
+                    48,
+                )
+                content = self._truncate_text(
+                    self._normalize_text_fragment(str(item.get("content", ""))),
+                    180,
+                )
+                if not title or not content:
+                    continue
                 lines.append(
                     f"[id={item.get('id')}|mode={item.get('mode')}|scope={item.get('scope')}|importance={item.get('importance')}] "
-                    f"{item.get('title', '')}: {item.get('content', '')}"
+                    f"{title}: {content}"
                 )
 
+            if not lines:
+                return {"status": "no_source", "before": before_total, "after": before_total}
+
             system_prompt = (
-                "你是记忆重整器。任务：在不丢失关键信息的前提下压缩记忆池。\n"
-                "目标：合并重复、删除噪声和过期细节、保留高价值长期信息。\n"
+                "你是记忆压缩器。目标：合并重复、删除噪声、保留关键长期信息。\n"
                 "输出必须是 JSON 数组，且最多保留指定条数。\n"
                 "每个元素格式：{\"scope\":\"global|mode|session\",\"mode\":\"work|rest\",\"title\":\"...\",\"content\":\"...\",\"importance\":8}\n"
-                "importance 范围 1-10。\n"
-                "如果没有值得保留的内容，输出 []。"
+                "importance 范围 1-10，只输出 JSON。"
             )
 
             response = await context.llm_generate(

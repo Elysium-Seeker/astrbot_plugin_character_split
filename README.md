@@ -14,6 +14,10 @@
 
 ## 🆕 更新日志
 
+### v1.2.0
+- 新增 `/autodream` 能力：按间隔检查记忆池，当记忆总量过高时自动重整并保留重要内容。
+- 新增 `/autodream status` 与 `/autodream run`，可查看状态并手动触发重整。
+
 ### v1.1.9
 - 调整记忆总结触发条件：对话少于 2 条时不再直接跳过，改为交给模型自行判断是否沉淀。
 - `/csmem sync` 改为使用当前会话全量历史进行总结，不再截断为最近 40 条。
@@ -53,6 +57,7 @@
 1. **时间窗**：支持多个区间（如 `09:00-12:00,13:30-18:00`），也支持跨夜（如 `22:00-02:00`）。
 2. **白名单**：把某些群或私聊死死焊在工作/休息模式上。
 3. **提示词设定**：填好 Core / Work / Rest 三组设定，让它该卷就卷，该摸鱼就摸鱼。
+4. **AutoDream 参数**：可配置 `autodream_interval_seconds`、`autodream_total_threshold`、`autodream_retain_count`、`autodream_source_limit` 控制自动整理频率和强度。
 
 ## 🎉 常用指令
 
@@ -66,5 +71,8 @@
 | `/csmem list` | 翻一翻当前环境的三层记忆池里都记了啥 |
 | `/csmem rm <id>` | 记错了？抄下 list 里的 ID 给删了 |
 | `/csmem sync` | 觉得 Bot 脑子跟不上？赶紧手动敲一锤，让它立刻把刚刚聊的总结存起来 |
+| `/autodream help` | 看 AutoDream 的指令帮助 |
+| `/autodream status` | 看自动整理是否开启、阈值多少、当前记忆量多少 |
+| `/autodream run` | 手动触发一次记忆池重整，压缩并保留重要内容 |
 
 *(如有需要，你甚至可以像使用 /mode set auto 这样兼容旧版本的指令写法。感谢使用！)*

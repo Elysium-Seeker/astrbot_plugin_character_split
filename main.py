@@ -1,6 +1,7 @@
 # pyright: reportMissingImports=false
 
 import asyncio
+import time
 from typing import Any, Dict, Optional, Tuple
 
 try:
@@ -34,7 +35,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.api.star import StarTools
 
-@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.1.9")
+@register("character_split", "Elysium-Seeker", "Split work/rest dialog and manage auto-memory", "1.2.0")
 class CharacterSplitPlugin(Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -51,6 +52,8 @@ class CharacterSplitPlugin(Star):
         
         self._runtime_state_lock = asyncio.Lock()
         self._mode_dirty_runtime: Dict[str, Dict[str, bool]] = {}
+        self._autodream_last_run: Dict[str, float] = {}
+        self._autodream_running: Dict[str, bool] = {}
 
     async def initialize(self):
         await self._state_store.ensure_state()
@@ -206,6 +209,68 @@ class CharacterSplitPlugin(Star):
                 history_limit=None,
             )
         )
+
+    @filter.command_group("autodream", desc="定时整理记忆池，超量时自动瘦身")
+    def autodream(self):
+        """Auto memory compaction management group"""
+
+    @autodream.command("help", desc="查看自动整理指令帮助")
+    async def autodream_help(self, event: AstrMessageEvent):
+        yield event.plain_result(
+            "AutoDream Commands:\n"
+            "/autodream help - 看帮助\n"
+            "/autodream status - 看当前配置和记忆量\n"
+            "/autodream run - 立刻手动整理一次记忆池"
+        )
+
+    @autodream.command("status", desc="查看自动整理配置与当前记忆量")
+    async def autodream_status(self, event: AstrMessageEvent):
+        session_id, umo = self._get_session_identifiers(event)
+        mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
+        enabled, interval_sec, threshold, retain_count, source_limit = self._get_autodream_settings()
+        total = await self._memory_manager.get_memory_total(umo)
+        running = bool(self._autodream_running.get(umo, False))
+        last_ts = self._autodream_last_run.get(umo)
+        if last_ts:
+            last_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_ts))
+        else:
+            last_text = "-"
+
+        yield event.plain_result(
+            "AutoDream 状态:\n"
+            f"enabled: {enabled}\n"
+            f"mode: {mode}\n"
+            f"memory_total: {total}\n"
+            f"running: {running}\n"
+            f"interval_seconds: {interval_sec}\n"
+            f"threshold: {threshold}\n"
+            f"retain_count: {retain_count}\n"
+            f"source_limit: {source_limit}\n"
+            f"last_run: {last_text}"
+        )
+
+    @autodream.command("run", desc="立刻整理当前会话源的记忆池")
+    async def autodream_run(self, event: AstrMessageEvent):
+        session_id, umo = self._get_session_identifiers(event)
+        mode, _ = await self._mode_resolver.resolve_mode(session_id, umo)
+
+        if not umo:
+            yield event.plain_result("无法识别当前会话源，稍后重试。")
+            return
+
+        if self._autodream_running.get(umo, False):
+            yield event.plain_result("AutoDream 正在运行中，请稍等。")
+            return
+
+        self._autodream_running[umo] = True
+        try:
+            result = await self._run_autodream_once(umo, mode, force=True)
+            self._autodream_last_run[umo] = time.time()
+        finally:
+            self._autodream_running[umo] = False
+
+        yield event.plain_result(self._format_autodream_result(result, mode, manual=True))
+
     @filter.on_llm_request(
         priority=100,
         desc="拦截 LLM 请求前置钩子：根据时间和用户配置判定工作状况并剥离上下文及注入增量提示词",
@@ -239,6 +304,7 @@ class CharacterSplitPlugin(Star):
 
             self._mark_mode_dirty(umo, mode)
             await self._inject_mode_prompt(req, mode, umo)
+            await self._maybe_trigger_autodream(umo, mode)
         except Exception:
             logger.exception("character_split on_llm_request failed")
             raise
@@ -356,6 +422,99 @@ class CharacterSplitPlugin(Star):
             return "rest"
         return None
 
+    def _get_autodream_settings(self) -> Tuple[bool, int, int, int, int]:
+        enabled = self._split_config.get_bool("autodream_enabled", True)
+        interval_sec = self._split_config.get_int("autodream_interval_seconds", 900, 60, 86400)
+        threshold = self._split_config.get_int("autodream_total_threshold", 120, 10, 10000)
+        retain_count = self._split_config.get_int("autodream_retain_count", 60, 5, 2000)
+        source_limit = self._split_config.get_int("autodream_source_limit", 300, retain_count, 5000)
+        return enabled, interval_sec, threshold, retain_count, source_limit
+
+    async def _run_autodream_once(self, umo: str, mode: str, force: bool = False) -> Dict[str, Any]:
+        enabled, _interval_sec, threshold, retain_count, source_limit = self._get_autodream_settings()
+        if not enabled and not force:
+            return {"status": "disabled"}
+
+        total = await self._memory_manager.get_memory_total(umo)
+        if total <= 0:
+            return {"status": "empty", "before": 0, "after": 0}
+        if (not force) and total < threshold:
+            return {"status": "below_threshold", "before": total, "after": total, "threshold": threshold}
+
+        return await self._memory_manager.autodream_compact(
+            context=self.context,
+            umo=umo,
+            mode=mode,
+            retain_count=retain_count,
+            source_limit=source_limit,
+        )
+
+    async def _maybe_trigger_autodream(self, umo: str, mode: str):
+        if not umo:
+            return
+
+        enabled, interval_sec, _threshold, _retain_count, _source_limit = self._get_autodream_settings()
+        if not enabled:
+            return
+        if self._autodream_running.get(umo, False):
+            return
+
+        now_ts = time.time()
+        last_ts = self._autodream_last_run.get(umo, 0.0)
+        if now_ts - last_ts < interval_sec:
+            return
+
+        self._autodream_last_run[umo] = now_ts
+        self._autodream_running[umo] = True
+
+        async def _runner():
+            try:
+                result = await self._run_autodream_once(umo, mode, force=False)
+                status = result.get("status")
+                if status == "ok":
+                    logger.info(
+                        f"[AutoDream] compacted umo={umo} mode={mode} "
+                        f"{result.get('before')}->{result.get('after')}"
+                    )
+                elif status == "below_threshold":
+                    logger.info(
+                        f"[AutoDream] skip below threshold for umo={umo} "
+                        f"total={result.get('before')} threshold={result.get('threshold')}"
+                    )
+                else:
+                    logger.warning(f"[AutoDream] skip status={status} umo={umo}")
+            except Exception:
+                logger.exception(f"[AutoDream] periodic run failed for umo={umo}")
+            finally:
+                self._autodream_running[umo] = False
+
+        asyncio.create_task(_runner())
+
+    def _format_autodream_result(self, result: Dict[str, Any], mode: str, manual: bool = False) -> str:
+        status = str(result.get("status", "unknown"))
+        before = int(result.get("before", 0) or 0)
+        after = int(result.get("after", before) or before)
+
+        if status == "ok":
+            source = "手动" if manual else "自动"
+            return f"✅ AutoDream({source}) 完成：[{mode}] 记忆 {before} -> {after}"
+        if status == "below_threshold":
+            threshold = int(result.get("threshold", 0) or 0)
+            return f"ℹ️ 当前记忆总量 {before}，未达到阈值 {threshold}，暂不整理。"
+        if status == "empty":
+            return "ℹ️ 当前没有可整理的记忆。"
+        if status == "disabled":
+            return "⚠️ AutoDream 当前是关闭状态，请先在配置中启用 autodream_enabled。"
+        if status == "no_provider":
+            return "⚠️ 当前无法获取可用模型提供方，AutoDream 暂时无法执行。"
+        if status == "no_output":
+            return "ℹ️ 本轮整理没有产出可保留的新记忆，原记忆保持不变。"
+        if status == "replace_failed":
+            return "❌ AutoDream 写回整理结果失败，原记忆未完成替换。"
+        if status == "bad_json":
+            return "⚠️ AutoDream 输出格式异常（非 JSON），本轮跳过。"
+        return f"⚠️ AutoDream 未完成，状态：{status}"
+
     def _create_state_store(self) -> StateStore:
         return StateStore(
             plugin_name=str(getattr(self, "name", PLUGIN_NAME) or PLUGIN_NAME),
@@ -407,4 +566,8 @@ class CharacterSplitPlugin(Star):
             "/csmem list - 翻一翻当前的三层记忆池\n"
             "/csmem rm <id> - 记错了？抄下 list 里的 ID 删了\n"
             "/csmem sync - 觉得脑子跟不上？赶紧敲一锤立刻总结\n"
+            "----- AutoDream -----\n"
+            "/autodream help - 看自动整理指令\n"
+            "/autodream status - 查看自动整理配置与当前记忆量\n"
+            "/autodream run - 立刻整理当前会话源记忆\n"
         )

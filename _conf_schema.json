@@ -66,6 +66,36 @@
     "type": "bool",
     "default": true
   },
+  "autodream_enabled": {
+    "description": "[AutoDream] 启用定时记忆整理",
+    "hint": "开启后会按固定间隔检查当前会话源的记忆池，当总量超阈值时自动重整并保留高价值内容。",
+    "type": "bool",
+    "default": true
+  },
+  "autodream_interval_seconds": {
+    "description": "[AutoDream] 触发检查间隔（秒）",
+    "hint": "每隔多少秒检查一次是否需要整理；建议 300~1800。",
+    "type": "int",
+    "default": 900
+  },
+  "autodream_total_threshold": {
+    "description": "[AutoDream] 记忆总量阈值",
+    "hint": "当某个会话源的记忆总数超过这个值时，才会触发自动重整。",
+    "type": "int",
+    "default": 120
+  },
+  "autodream_retain_count": {
+    "description": "[AutoDream] 重整后保留条数上限",
+    "hint": "每轮重整最多保留多少条记忆，数值越小压缩越激进。",
+    "type": "int",
+    "default": 60
+  },
+  "autodream_source_limit": {
+    "description": "[AutoDream] 单轮整理输入上限",
+    "hint": "每轮最多取多少条旧记忆送入整理。为了控制成本，不建议无限放大。",
+    "type": "int",
+    "default": 300
+  },
   "core_persona_prompt": {
     "description": "[Prompt工程] AI 核心主轴基础人设",
     "hint": "无论在哪种工作或生活模式，这段性格要求都会带上。建议将世界观设定、安全红线或坚守的性格认同写在这里。",

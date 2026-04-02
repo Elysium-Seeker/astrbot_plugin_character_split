@@ -14,6 +14,9 @@
 
 ## 🆕 最近更新
 
+- v1.2.3 (2026-04-02)
+   - docs: 极简重构 README 正文，并恢复特色居中徽章与萌系计数器
+
 - v1.2.2 (2026-04-02)
    - 接入 AutoDream 自动调度与 /autodream status|run 指令
    - 三层记忆提取升级，强化 global/mode/session 分类并修复 Layer3 偏置

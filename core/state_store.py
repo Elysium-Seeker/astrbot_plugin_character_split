@@ -114,6 +114,106 @@ class StateStore:
             session_map = self._state["session_conversations"].setdefault(umo, {})
             session_map.pop(mode, None)
 
+    async def get_memory_injection_cursors(self, umo: str, mode: str) -> Dict[str, int]:
+        async with self._state_lock:
+            if not self._state or not umo:
+                return {"global": 0, "mode": 0, "session": 0}
+
+            root = self._state["memory_injection_cursors"].get(umo, {})
+            global_cursor = self._safe_int(root.get("global"), 0)
+
+            mode_map = root.get(mode, {}) if isinstance(root, dict) else {}
+            mode_cursor = 0
+            session_cursor = 0
+            if isinstance(mode_map, dict):
+                mode_cursor = self._safe_int(mode_map.get("mode"), 0)
+                session_cursor = self._safe_int(mode_map.get("session"), 0)
+
+            return {
+                "global": max(0, global_cursor),
+                "mode": max(0, mode_cursor),
+                "session": max(0, session_cursor),
+            }
+
+    async def update_memory_injection_cursors(self, umo: str, mode: str, cursors: Dict[str, int]):
+        async with self._state_lock:
+            if not self._state or not umo:
+                return
+
+            root = self._state["memory_injection_cursors"].setdefault(umo, {})
+            if not isinstance(root, dict):
+                root = {}
+                self._state["memory_injection_cursors"][umo] = root
+
+            if "global" in cursors:
+                current = self._safe_int(root.get("global"), 0)
+                root["global"] = max(current, self._safe_int(cursors.get("global"), 0))
+
+            if mode:
+                mode_map = root.setdefault(mode, {})
+                if not isinstance(mode_map, dict):
+                    mode_map = {}
+                    root[mode] = mode_map
+
+                if "mode" in cursors:
+                    current_mode = self._safe_int(mode_map.get("mode"), 0)
+                    mode_map["mode"] = max(current_mode, self._safe_int(cursors.get("mode"), 0))
+
+                if "session" in cursors:
+                    current_session = self._safe_int(mode_map.get("session"), 0)
+                    mode_map["session"] = max(current_session, self._safe_int(cursors.get("session"), 0))
+
+    async def clear_memory_injection_cursors(self, umo: str):
+        async with self._state_lock:
+            if not self._state or not umo:
+                return
+            self._state["memory_injection_cursors"].pop(umo, None)
+
+    async def get_mode_period(self, umo: str, mode: str) -> int:
+        async with self._state_lock:
+            if not self._state or not umo or not mode:
+                return 0
+
+            root = self._state["memory_mode_periods"].get(umo, {})
+            if not isinstance(root, dict):
+                return 0
+            return max(0, self._safe_int(root.get(mode), 0))
+
+    async def bump_mode_period(self, umo: str, mode: str) -> int:
+        async with self._state_lock:
+            if not self._state or not umo or not mode:
+                return 0
+
+            root = self._state["memory_mode_periods"].setdefault(umo, {})
+            if not isinstance(root, dict):
+                root = {}
+                self._state["memory_mode_periods"][umo] = root
+
+            current = max(0, self._safe_int(root.get(mode), 0))
+            next_period = current + 1
+            root[mode] = next_period
+            return next_period
+
+    async def ensure_mode_period(self, umo: str, mode: str) -> int:
+        async with self._state_lock:
+            if not self._state or not umo or not mode:
+                return 0
+
+            root = self._state["memory_mode_periods"].setdefault(umo, {})
+            if not isinstance(root, dict):
+                root = {}
+                self._state["memory_mode_periods"][umo] = root
+
+            current = max(0, self._safe_int(root.get(mode), 0))
+            if current <= 0:
+                current = 1
+                root[mode] = current
+            return current
+
+    async def get_previous_mode_period(self, umo: str, mode: str) -> int:
+        current = await self.get_mode_period(umo, mode)
+        return max(0, current - 1)
+
     async def _load_state_from_kv(self) -> Optional[Dict[str, Any]]:
         if self._get_kv_data_func is None:
             return None
@@ -200,7 +300,16 @@ class StateStore:
         return {
             "session_overrides": {},
             "session_conversations": {},
+            "memory_injection_cursors": {},
+            "memory_mode_periods": {},
         }
+
+    @staticmethod
+    def _safe_int(raw: Any, default: int = 0) -> int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
 
     async def _call_maybe_async(self, func: Any, *args: Any) -> Any:
         if inspect.iscoroutinefunction(func):

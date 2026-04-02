@@ -17,6 +17,13 @@
 
 ## 🆕 最近更新
 
+- v1.2.2 (2026-04-02)
+   - 接入 AutoDream 自动调度与 `/autodream status|run` 指令
+   - 三层记忆提取升级，强化 global/mode/session 分类并修复 Layer3 偏置
+   - 注入策略升级：切换时段优先 + 高分旧记忆补充 + 普通轮次增量注入
+   - 新增衰减策略：global 核心不衰减、mode 30 天半衰、session 3 天半衰
+   - 新增 `/csmem clear`，`/csmem sync` 结束后直接返回整理结果
+
 - v1.2.1 (2026-04-02)
    - 新增一键发布脚本，自动递增版本并同步 metadata/main
    - 发布时自动写入 CHANGELOG 并更新 README 最近更新
@@ -63,6 +70,7 @@ python update.py --level minor --note "新增自动记忆压缩策略" --note "�
 - 强制分流名单：将特定会话强制绑定为工作/休息。
 - 增强提示词：自定义你的 Work / Rest / Core 提示词片段。
 - 记忆联动相关参数及防抖跳跃等高阶配置。
+- AutoDream 自动整理、增量注入、切换时段优先注入、importance 衰减与小惊喜回想配置。
 
 ## 🎉 指令
 
@@ -76,7 +84,10 @@ python update.py --level minor --note "新增自动记忆压缩策略" --note "�
 | `/mode set work\|rest\|auto` | 所有人 | 兼容旧版用法 |
 | `/csmem list` | 所有人 | 查看当前模式下的三层记忆 |
 | `/csmem rm <id>` | 所有人 | 删除指定记忆 |
+| `/csmem clear` | 所有人 | 清空当前会话（umo）三层记忆池 |
 | `/csmem sync` | 所有人 | 手动触发当前会话记忆提取 |
+| `/autodream status` | 所有人 | 查看 AutoDream 自动整理状态 |
+| `/autodream run` | 所有人 | 立即执行一次 AutoDream 整理 |
 
 ## 🧠 插件工作流程
 

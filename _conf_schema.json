@@ -126,6 +126,102 @@
     "type": "int",
     "default": 4800
   },
+  "autodream_enabled": {
+    "description": "[AutoDream] 是否启用自动记忆整理",
+    "hint": "开启后会按间隔自动检查记忆池大小，超过阈值则触发 AutoDream 压缩。",
+    "type": "bool",
+    "default": true
+  },
+  "autodream_interval_seconds": {
+    "description": "[AutoDream] 自动检查间隔（秒）",
+    "hint": "每次自动检查 AutoDream 的最小时间间隔，避免频繁触发。",
+    "type": "int",
+    "default": 900
+  },
+  "autodream_total_threshold": {
+    "description": "[AutoDream] 触发总量阈值",
+    "hint": "当前会话记忆总数达到该值后，自动触发一次整理。",
+    "type": "int",
+    "default": 120
+  },
+  "autodream_retain_count": {
+    "description": "[AutoDream] 整理后保留条数",
+    "hint": "AutoDream 压缩后最多保留多少条记忆。",
+    "type": "int",
+    "default": 60
+  },
+  "autodream_source_limit": {
+    "description": "[AutoDream] 整理输入条数上限",
+    "hint": "每次 AutoDream 送入模型参与重整的原始记忆条数上限。",
+    "type": "int",
+    "default": 180
+  },
+  "memory_delta_injection_enabled": {
+    "description": "[注入策略] 是否启用增量记忆注入",
+    "hint": "开启后普通轮次只注入新增记忆，减少重复 token 消耗。",
+    "type": "bool",
+    "default": true
+  },
+  "switch_period_priority_injection": {
+    "description": "[注入策略] 切换时段优先注入",
+    "hint": "切换到某模式时，优先注入该模式最近一次时段的 Layer2/Layer3 记忆。",
+    "type": "bool",
+    "default": true
+  },
+  "switch_period_fallback_to_recent": {
+    "description": "[注入策略] 时段缺失时回退最近窗口",
+    "hint": "若找不到目标模式的最近时段记忆，则自动回退到该模式最近窗口记忆。",
+    "type": "bool",
+    "default": true
+  },
+  "switch_period_bonus_limit": {
+    "description": "[注入策略] 切换时补充高分旧记忆条数",
+    "hint": "切换模式注入时额外补充的高分历史记忆数量，通常设为 1。",
+    "type": "int",
+    "default": 1
+  },
+  "memory_surprise_probability_percent": {
+    "description": "[注入策略] 小惊喜回想概率（%）",
+    "hint": "普通轮次注入时小概率补入较旧记忆，增强偶发回想体验。",
+    "type": "int",
+    "default": 8
+  },
+  "memory_surprise_max_items": {
+    "description": "[注入策略] 小惊喜最多补充条数",
+    "hint": "每轮注入最多补入几条旧记忆，建议 0-1。",
+    "type": "int",
+    "default": 1
+  },
+  "global_no_decay_min_importance": {
+    "description": "[衰减策略] 全局不衰减阈值",
+    "hint": "global 层 importance 大于等于该值时不做时间衰减，仅依赖 AutoDream 清理。",
+    "type": "int",
+    "default": 9
+  },
+  "global_half_life_days": {
+    "description": "[衰减策略] 全局记忆半衰期（天）",
+    "hint": "global 层低于不衰减阈值的记忆所使用的半衰期。",
+    "type": "int",
+    "default": 180
+  },
+  "mode_half_life_days": {
+    "description": "[衰减策略] 模式记忆半衰期（天）",
+    "hint": "Layer2(mode) 的有效分半衰期，默认按月衰减。",
+    "type": "int",
+    "default": 30
+  },
+  "session_half_life_days": {
+    "description": "[衰减策略] 会话记忆半衰期（天）",
+    "hint": "Layer3(session) 的有效分半衰期，默认 3 天。",
+    "type": "int",
+    "default": 3
+  },
+  "low_importance_decay_boost_pct": {
+    "description": "[衰减策略] 低重要度加速衰减系数（%）",
+    "hint": "数值越大，低 importance 记忆衰减越快，100 表示标准加速。",
+    "type": "int",
+    "default": 100
+  },
   "core_persona_prompt": {
     "description": "[Prompt工程] AI 核心主轴基础人设",
     "hint": "无论在哪种工作或生活模式，这段性格要求都会带上。建议将世界观设定、安全红线或坚守的性格认同写在这里。",

@@ -1,8 +1,11 @@
 import asyncio
 import json
+import math
 import os
+import random
 import sqlite3
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence
 
 SCOPE_GLOBAL = "global"
 SCOPE_MODE = "mode"
@@ -31,7 +34,10 @@ class MemoryManager:
                         content TEXT NOT NULL,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                         importance INTEGER DEFAULT 5,
-                        scope TEXT DEFAULT 'mode'
+                        scope TEXT DEFAULT 'mode',
+                        period_id INTEGER DEFAULT 0,
+                        source TEXT DEFAULT 'summary',
+                        last_used_at DATETIME
                     )
                     """
                 )
@@ -39,6 +45,9 @@ class MemoryManager:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_umo_scope ON mode_memories (umo, scope)")
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_umo_mode_scope ON mode_memories (umo, mode, scope)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_umo_mode_period ON mode_memories (umo, mode, period_id)"
                 )
 
                 # legacy schema migrations
@@ -50,9 +59,28 @@ class MemoryManager:
                     cursor.execute("ALTER TABLE mode_memories ADD COLUMN scope TEXT DEFAULT 'mode'")
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    cursor.execute("ALTER TABLE mode_memories ADD COLUMN period_id INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE mode_memories ADD COLUMN source TEXT DEFAULT 'summary'")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE mode_memories ADD COLUMN last_used_at DATETIME")
+                except sqlite3.OperationalError:
+                    pass
                 conn.commit()
         except Exception as exc:
             self.logger.error(f"Failed to initialize memory DB: {exc}")
+
+    @staticmethod
+    def _safe_int(raw: Any, default: int = 0) -> int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _normalize_scope(scope: str) -> str:
@@ -68,15 +96,199 @@ class MemoryManager:
         return max(1, min(10, value))
 
     @staticmethod
+    def _parse_timestamp(raw: Any) -> Optional[datetime]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            pass
+
+        formats = ["%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"]
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(text, fmt)
+                return dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
     def _row_to_memory(row: Any) -> Dict[str, Any]:
         return {
             "id": row[0],
-            "title": row[1],
-            "content": row[2],
-            "timestamp": row[3],
-            "importance": row[4],
-            "scope": row[5],
+            "mode": row[1],
+            "scope": row[2],
+            "title": row[3],
+            "content": row[4],
+            "timestamp": row[5],
+            "importance": row[6],
+            "period_id": row[7],
+            "source": row[8],
         }
+
+    def _effective_importance(
+        self,
+        item: Dict[str, Any],
+        global_no_decay_min_importance: int,
+        global_half_life_days: int,
+        mode_half_life_days: int,
+        session_half_life_days: int,
+        low_importance_decay_boost: float,
+    ) -> float:
+        base = float(self._normalize_importance(item.get("importance", 5)))
+        scope = self._normalize_scope(str(item.get("scope", SCOPE_MODE)))
+
+        if scope == SCOPE_GLOBAL and base >= float(max(1, global_no_decay_min_importance)):
+            return base
+
+        if scope == SCOPE_GLOBAL:
+            half_life_days = max(1.0, float(global_half_life_days))
+        elif scope == SCOPE_MODE:
+            half_life_days = max(1.0, float(mode_half_life_days))
+        else:
+            half_life_days = max(1.0, float(session_half_life_days))
+
+        dt = self._parse_timestamp(item.get("timestamp"))
+        if dt is None:
+            return base
+
+        now = datetime.now(timezone.utc)
+        age_seconds = max(0.0, (now - dt.astimezone(timezone.utc)).total_seconds())
+        age_days = age_seconds / 86400.0
+
+        priority_factor = 1.0 + ((10.0 - base) / 9.0) * max(0.0, float(low_importance_decay_boost))
+        decay = math.exp(-math.log(2.0) * age_days * priority_factor / half_life_days)
+        return base * decay
+
+    def _rank_memories(
+        self,
+        items: List[Dict[str, Any]],
+        global_no_decay_min_importance: int,
+        global_half_life_days: int,
+        mode_half_life_days: int,
+        session_half_life_days: int,
+        low_importance_decay_boost: float,
+    ) -> List[Dict[str, Any]]:
+        ranked: List[Dict[str, Any]] = []
+        for item in items:
+            cloned = dict(item)
+            cloned["_score"] = self._effective_importance(
+                cloned,
+                global_no_decay_min_importance=global_no_decay_min_importance,
+                global_half_life_days=global_half_life_days,
+                mode_half_life_days=mode_half_life_days,
+                session_half_life_days=session_half_life_days,
+                low_importance_decay_boost=low_importance_decay_boost,
+            )
+            ranked.append(cloned)
+
+        ranked.sort(
+            key=lambda x: (
+                float(x.get("_score", 0.0)),
+                self._normalize_importance(x.get("importance", 5)),
+                self._safe_int(x.get("id"), 0),
+            ),
+            reverse=True,
+        )
+        return ranked
+
+    @staticmethod
+    def _strip_rank_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = dict(item)
+        cleaned.pop("_score", None)
+        return cleaned
+
+    def _query_scope_rows(
+        self,
+        cursor: sqlite3.Cursor,
+        umo: str,
+        mode: str,
+        scope: str,
+        min_id: int = 0,
+        period_id: Optional[int] = None,
+        exclude_ids: Optional[Sequence[int]] = None,
+        candidate_size: int = 80,
+    ) -> List[Dict[str, Any]]:
+        normalized_scope = self._normalize_scope(scope)
+        params: List[Any] = [umo, normalized_scope]
+        query = (
+            "SELECT id, mode, scope, title, content, timestamp, importance, period_id, source "
+            "FROM mode_memories WHERE umo = ? AND scope = ?"
+        )
+
+        if normalized_scope != SCOPE_GLOBAL:
+            query += " AND mode = ?"
+            params.append(mode)
+
+        safe_min_id = max(0, self._safe_int(min_id, 0))
+        if safe_min_id > 0:
+            query += " AND id > ?"
+            params.append(safe_min_id)
+
+        if period_id is not None:
+            query += " AND period_id = ?"
+            params.append(max(0, self._safe_int(period_id, 0)))
+
+        safe_excludes = [max(0, self._safe_int(i, 0)) for i in (exclude_ids or []) if self._safe_int(i, 0) > 0]
+        if safe_excludes:
+            placeholders = ",".join("?" for _ in safe_excludes)
+            query += f" AND id NOT IN ({placeholders})"
+            params.extend(safe_excludes)
+
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, self._safe_int(candidate_size, 80)))
+
+        cursor.execute(query, tuple(params))
+        return [self._row_to_memory(row) for row in cursor.fetchall()]
+
+    def _pick_surprise_memory(
+        self,
+        cursor: sqlite3.Cursor,
+        umo: str,
+        mode: str,
+        excluded_ids: Optional[Sequence[int]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = (
+            "SELECT id, mode, scope, title, content, timestamp, importance, period_id, source "
+            "FROM mode_memories WHERE umo = ? AND mode = ? AND scope IN (?, ?)"
+        )
+        params: List[Any] = [umo, mode, SCOPE_MODE, SCOPE_SESSION]
+
+        safe_excludes = [max(0, self._safe_int(i, 0)) for i in (excluded_ids or []) if self._safe_int(i, 0) > 0]
+        if safe_excludes:
+            placeholders = ",".join("?" for _ in safe_excludes)
+            query += f" AND id NOT IN ({placeholders})"
+            params.extend(safe_excludes)
+
+        query += " ORDER BY id ASC LIMIT 180"
+        cursor.execute(query, tuple(params))
+        rows = [self._row_to_memory(row) for row in cursor.fetchall()]
+        if not rows:
+            return None
+
+        older: List[Dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        for item in rows:
+            dt = self._parse_timestamp(item.get("timestamp"))
+            if dt is None:
+                continue
+            age_days = (now - dt.astimezone(timezone.utc)).total_seconds() / 86400.0
+            if age_days >= 1.0:
+                older.append(item)
+
+        pool = older if older else rows
+        if not pool:
+            return None
+
+        older_half_count = max(1, len(pool) // 2)
+        surprise_pool = pool[:older_half_count]
+        return random.choice(surprise_pool)
 
     async def add_memory(
         self,
@@ -86,12 +298,18 @@ class MemoryManager:
         content: str,
         importance: int = 5,
         scope: str = SCOPE_MODE,
+        period_id: int = 0,
+        source: str = "summary",
     ) -> int:
         def _add() -> int:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO mode_memories (umo, mode, title, content, importance, scope) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "INSERT INTO mode_memories "
+                        "(umo, mode, title, content, importance, scope, period_id, source) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    ),
                     (
                         umo,
                         mode,
@@ -99,6 +317,8 @@ class MemoryManager:
                         content.strip(),
                         self._normalize_importance(importance),
                         self._normalize_scope(scope),
+                        max(0, self._safe_int(period_id, 0)),
+                        str(source or "summary").strip() or "summary",
                     ),
                 )
                 conn.commit()
@@ -117,74 +337,344 @@ class MemoryManager:
         global_limit: int = 5,
         mode_limit: int = 5,
         session_limit: int = 5,
+        min_global_id: int = 0,
+        min_mode_id: int = 0,
+        min_session_id: int = 0,
+        global_no_decay_min_importance: int = 9,
+        global_half_life_days: int = 180,
+        mode_half_life_days: int = 30,
+        session_half_life_days: int = 3,
+        low_importance_decay_boost: float = 1.0,
+        surprise_probability: float = 0.0,
+        surprise_max_items: int = 0,
     ) -> Dict[str, List[Dict[str, Any]]]:
+        def _safe_limit(value: Any) -> int:
+            try:
+                num = int(value)
+            except (TypeError, ValueError):
+                num = 0
+            return max(0, num)
+
         def _get() -> Dict[str, List[Dict[str, Any]]]:
-            def _safe_limit(value: Any) -> int:
-                try:
-                    num = int(value)
-                except (TypeError, ValueError):
-                    num = 0
-                return max(0, num)
+            layers: Dict[str, List[Dict[str, Any]]] = {
+                SCOPE_GLOBAL: [],
+                SCOPE_MODE: [],
+                SCOPE_SESSION: [],
+            }
+
+            global_size = _safe_limit(global_limit)
+            mode_size = _safe_limit(mode_limit)
+            session_size = _safe_limit(session_limit)
 
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                layers: Dict[str, List[Dict[str, Any]]] = {
-                    SCOPE_GLOBAL: [],
-                    SCOPE_MODE: [],
-                    SCOPE_SESSION: [],
-                }
-
-                global_size = _safe_limit(global_limit)
-                mode_size = _safe_limit(mode_limit)
-                session_size = _safe_limit(session_limit)
 
                 if global_size > 0:
-                    cursor.execute(
-                        """
-                        SELECT id, title, content, timestamp, importance, scope
-                        FROM mode_memories
-                        WHERE umo = ? AND scope = ?
-                        ORDER BY importance DESC, id DESC
-                        LIMIT ?
-                        """,
-                        (umo, SCOPE_GLOBAL, global_size),
+                    global_rows = self._query_scope_rows(
+                        cursor,
+                        umo=umo,
+                        mode=mode,
+                        scope=SCOPE_GLOBAL,
+                        min_id=min_global_id,
+                        candidate_size=max(80, global_size * 10),
                     )
-                    layers[SCOPE_GLOBAL] = [self._row_to_memory(row) for row in cursor.fetchall()]
+                    global_ranked = self._rank_memories(
+                        global_rows,
+                        global_no_decay_min_importance=global_no_decay_min_importance,
+                        global_half_life_days=global_half_life_days,
+                        mode_half_life_days=mode_half_life_days,
+                        session_half_life_days=session_half_life_days,
+                        low_importance_decay_boost=low_importance_decay_boost,
+                    )
+                    layers[SCOPE_GLOBAL] = global_ranked[:global_size]
 
                 if mode_size > 0:
-                    cursor.execute(
-                        """
-                        SELECT id, title, content, timestamp, importance, scope
-                        FROM mode_memories
-                        WHERE umo = ? AND mode = ? AND scope = ?
-                        ORDER BY importance DESC, id DESC
-                        LIMIT ?
-                        """,
-                        (umo, mode, SCOPE_MODE, mode_size),
+                    mode_rows = self._query_scope_rows(
+                        cursor,
+                        umo=umo,
+                        mode=mode,
+                        scope=SCOPE_MODE,
+                        min_id=min_mode_id,
+                        candidate_size=max(80, mode_size * 10),
                     )
-                    layers[SCOPE_MODE] = [self._row_to_memory(row) for row in cursor.fetchall()]
+                    mode_ranked = self._rank_memories(
+                        mode_rows,
+                        global_no_decay_min_importance=global_no_decay_min_importance,
+                        global_half_life_days=global_half_life_days,
+                        mode_half_life_days=mode_half_life_days,
+                        session_half_life_days=session_half_life_days,
+                        low_importance_decay_boost=low_importance_decay_boost,
+                    )
+                    layers[SCOPE_MODE] = mode_ranked[:mode_size]
 
                 if session_size > 0:
-                    cursor.execute(
-                        """
-                        SELECT id, title, content, timestamp, importance, scope
-                        FROM mode_memories
-                        WHERE umo = ? AND mode = ? AND scope = ?
-                        ORDER BY id DESC
-                        LIMIT ?
-                        """,
-                        (umo, mode, SCOPE_SESSION, session_size),
+                    session_rows = self._query_scope_rows(
+                        cursor,
+                        umo=umo,
+                        mode=mode,
+                        scope=SCOPE_SESSION,
+                        min_id=min_session_id,
+                        candidate_size=max(80, session_size * 10),
                     )
-                    session_rows = cursor.fetchall()
-                    session_rows.sort(key=lambda row: row[0])
-                    layers[SCOPE_SESSION] = [self._row_to_memory(row) for row in session_rows]
+                    session_ranked = self._rank_memories(
+                        session_rows,
+                        global_no_decay_min_importance=global_no_decay_min_importance,
+                        global_half_life_days=global_half_life_days,
+                        mode_half_life_days=mode_half_life_days,
+                        session_half_life_days=session_half_life_days,
+                        low_importance_decay_boost=low_importance_decay_boost,
+                    )
+                    layers[SCOPE_SESSION] = session_ranked[:session_size]
 
-                return layers
+                surprise_count = max(0, self._safe_int(surprise_max_items, 0))
+                if surprise_count > 0 and float(surprise_probability) > 0:
+                    all_ids = {
+                        item["id"]
+                        for scope_items in layers.values()
+                        for item in scope_items
+                        if self._safe_int(item.get("id"), 0) > 0
+                    }
+                    for _ in range(surprise_count):
+                        if random.random() > float(surprise_probability):
+                            continue
+
+                        surprise = self._pick_surprise_memory(
+                            cursor,
+                            umo=umo,
+                            mode=mode,
+                            excluded_ids=list(all_ids),
+                        )
+                        if not surprise:
+                            continue
+
+                        scope = self._normalize_scope(str(surprise.get("scope", SCOPE_MODE)))
+                        if scope not in {SCOPE_MODE, SCOPE_SESSION}:
+                            continue
+
+                        all_ids.add(self._safe_int(surprise.get("id"), 0))
+                        layers[scope].append(surprise)
+
+                        scope_limit = mode_size if scope == SCOPE_MODE else session_size
+                        if scope_limit <= 0:
+                            layers[scope] = []
+                            continue
+
+                        reranked = self._rank_memories(
+                            layers[scope],
+                            global_no_decay_min_importance=global_no_decay_min_importance,
+                            global_half_life_days=global_half_life_days,
+                            mode_half_life_days=mode_half_life_days,
+                            session_half_life_days=session_half_life_days,
+                            low_importance_decay_boost=low_importance_decay_boost,
+                        )
+                        layers[scope] = reranked[:scope_limit]
+
+            return {
+                SCOPE_GLOBAL: [self._strip_rank_fields(i) for i in layers[SCOPE_GLOBAL]],
+                SCOPE_MODE: [self._strip_rank_fields(i) for i in layers[SCOPE_MODE]],
+                SCOPE_SESSION: [self._strip_rank_fields(i) for i in layers[SCOPE_SESSION]],
+            }
 
         try:
             return await asyncio.to_thread(_get)
         except Exception as exc:
             self.logger.error(f"Failed to get layered memories: {exc}")
+            return {SCOPE_GLOBAL: [], SCOPE_MODE: [], SCOPE_SESSION: []}
+
+    async def get_period_layered_memories(
+        self,
+        umo: str,
+        mode: str,
+        period_id: int,
+        mode_limit: int = 5,
+        session_limit: int = 5,
+        include_bonus: bool = True,
+        bonus_limit: int = 1,
+        fallback_to_recent: bool = True,
+        global_no_decay_min_importance: int = 9,
+        global_half_life_days: int = 180,
+        mode_half_life_days: int = 30,
+        session_half_life_days: int = 3,
+        low_importance_decay_boost: float = 1.0,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        safe_period = max(0, self._safe_int(period_id, 0))
+        safe_mode_limit = max(0, self._safe_int(mode_limit, 0))
+        safe_session_limit = max(0, self._safe_int(session_limit, 0))
+
+        if safe_mode_limit <= 0 and safe_session_limit <= 0:
+            return {SCOPE_GLOBAL: [], SCOPE_MODE: [], SCOPE_SESSION: []}
+
+        if safe_period <= 0 and fallback_to_recent:
+            recent = await self.get_layered_memories(
+                umo,
+                mode,
+                global_limit=0,
+                mode_limit=safe_mode_limit,
+                session_limit=safe_session_limit,
+                global_no_decay_min_importance=global_no_decay_min_importance,
+                global_half_life_days=global_half_life_days,
+                mode_half_life_days=mode_half_life_days,
+                session_half_life_days=session_half_life_days,
+                low_importance_decay_boost=low_importance_decay_boost,
+            )
+            recent[SCOPE_GLOBAL] = []
+            return recent
+
+        def _get() -> Dict[str, List[Dict[str, Any]]]:
+            layers: Dict[str, List[Dict[str, Any]]] = {
+                SCOPE_GLOBAL: [],
+                SCOPE_MODE: [],
+                SCOPE_SESSION: [],
+            }
+
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                if safe_mode_limit > 0:
+                    mode_rows = self._query_scope_rows(
+                        cursor,
+                        umo=umo,
+                        mode=mode,
+                        scope=SCOPE_MODE,
+                        period_id=safe_period,
+                        candidate_size=max(60, safe_mode_limit * 8),
+                    )
+                    mode_ranked = self._rank_memories(
+                        mode_rows,
+                        global_no_decay_min_importance=global_no_decay_min_importance,
+                        global_half_life_days=global_half_life_days,
+                        mode_half_life_days=mode_half_life_days,
+                        session_half_life_days=session_half_life_days,
+                        low_importance_decay_boost=low_importance_decay_boost,
+                    )
+                    layers[SCOPE_MODE] = mode_ranked[:safe_mode_limit]
+
+                if safe_session_limit > 0:
+                    session_rows = self._query_scope_rows(
+                        cursor,
+                        umo=umo,
+                        mode=mode,
+                        scope=SCOPE_SESSION,
+                        period_id=safe_period,
+                        candidate_size=max(60, safe_session_limit * 8),
+                    )
+                    session_ranked = self._rank_memories(
+                        session_rows,
+                        global_no_decay_min_importance=global_no_decay_min_importance,
+                        global_half_life_days=global_half_life_days,
+                        mode_half_life_days=mode_half_life_days,
+                        session_half_life_days=session_half_life_days,
+                        low_importance_decay_boost=low_importance_decay_boost,
+                    )
+                    layers[SCOPE_SESSION] = session_ranked[:safe_session_limit]
+
+                if not layers[SCOPE_MODE] and not layers[SCOPE_SESSION] and fallback_to_recent:
+                    if safe_mode_limit > 0:
+                        fallback_mode_rows = self._query_scope_rows(
+                            cursor,
+                            umo=umo,
+                            mode=mode,
+                            scope=SCOPE_MODE,
+                            candidate_size=max(80, safe_mode_limit * 8),
+                        )
+                        fallback_mode_ranked = self._rank_memories(
+                            fallback_mode_rows,
+                            global_no_decay_min_importance=global_no_decay_min_importance,
+                            global_half_life_days=global_half_life_days,
+                            mode_half_life_days=mode_half_life_days,
+                            session_half_life_days=session_half_life_days,
+                            low_importance_decay_boost=low_importance_decay_boost,
+                        )
+                        layers[SCOPE_MODE] = fallback_mode_ranked[:safe_mode_limit]
+
+                    if safe_session_limit > 0:
+                        fallback_session_rows = self._query_scope_rows(
+                            cursor,
+                            umo=umo,
+                            mode=mode,
+                            scope=SCOPE_SESSION,
+                            candidate_size=max(80, safe_session_limit * 8),
+                        )
+                        fallback_session_ranked = self._rank_memories(
+                            fallback_session_rows,
+                            global_no_decay_min_importance=global_no_decay_min_importance,
+                            global_half_life_days=global_half_life_days,
+                            mode_half_life_days=mode_half_life_days,
+                            session_half_life_days=session_half_life_days,
+                            low_importance_decay_boost=low_importance_decay_boost,
+                        )
+                        layers[SCOPE_SESSION] = fallback_session_ranked[:safe_session_limit]
+
+                safe_bonus_limit = max(0, self._safe_int(bonus_limit, 0))
+                if include_bonus and safe_bonus_limit > 0:
+                    excluded_ids = {
+                        self._safe_int(item.get("id"), 0)
+                        for item in (layers[SCOPE_MODE] + layers[SCOPE_SESSION])
+                        if self._safe_int(item.get("id"), 0) > 0
+                    }
+
+                    bonus_mode = self._query_scope_rows(
+                        cursor,
+                        umo=umo,
+                        mode=mode,
+                        scope=SCOPE_MODE,
+                        exclude_ids=list(excluded_ids),
+                        candidate_size=max(80, safe_bonus_limit * 20),
+                    )
+                    bonus_session = self._query_scope_rows(
+                        cursor,
+                        umo=umo,
+                        mode=mode,
+                        scope=SCOPE_SESSION,
+                        exclude_ids=list(excluded_ids),
+                        candidate_size=max(80, safe_bonus_limit * 20),
+                    )
+
+                    if safe_period > 0:
+                        bonus_mode = [m for m in bonus_mode if self._safe_int(m.get("period_id"), 0) != safe_period]
+                        bonus_session = [m for m in bonus_session if self._safe_int(m.get("period_id"), 0) != safe_period]
+
+                    bonus_all = bonus_mode + bonus_session
+                    bonus_ranked = self._rank_memories(
+                        bonus_all,
+                        global_no_decay_min_importance=global_no_decay_min_importance,
+                        global_half_life_days=global_half_life_days,
+                        mode_half_life_days=mode_half_life_days,
+                        session_half_life_days=session_half_life_days,
+                        low_importance_decay_boost=low_importance_decay_boost,
+                    )
+
+                    for item in bonus_ranked[:safe_bonus_limit]:
+                        scope = self._normalize_scope(str(item.get("scope", SCOPE_MODE)))
+                        if scope not in {SCOPE_MODE, SCOPE_SESSION}:
+                            continue
+
+                        layers[scope].append(item)
+                        scope_limit = safe_mode_limit if scope == SCOPE_MODE else safe_session_limit
+                        if scope_limit <= 0:
+                            layers[scope] = []
+                            continue
+
+                        reranked = self._rank_memories(
+                            layers[scope],
+                            global_no_decay_min_importance=global_no_decay_min_importance,
+                            global_half_life_days=global_half_life_days,
+                            mode_half_life_days=mode_half_life_days,
+                            session_half_life_days=session_half_life_days,
+                            low_importance_decay_boost=low_importance_decay_boost,
+                        )
+                        layers[scope] = reranked[:scope_limit]
+
+            return {
+                SCOPE_GLOBAL: [],
+                SCOPE_MODE: [self._strip_rank_fields(i) for i in layers[SCOPE_MODE]],
+                SCOPE_SESSION: [self._strip_rank_fields(i) for i in layers[SCOPE_SESSION]],
+            }
+
+        try:
+            return await asyncio.to_thread(_get)
+        except Exception as exc:
+            self.logger.error(f"Failed to get period layered memories: {exc}")
             return {SCOPE_GLOBAL: [], SCOPE_MODE: [], SCOPE_SESSION: []}
 
     async def get_recent_memories(
@@ -194,52 +684,26 @@ class MemoryManager:
         limit: int = 5,
         strategy: str = "recent",
     ) -> List[Dict[str, Any]]:
-        """Compatibility method for old call-sites.
-
-        Returns a flattened list of memories related to current mode:
-        global + mode + session, sorted by id descending by default.
-        """
-
-        def _get() -> List[Dict[str, Any]]:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                query = (
-                    """
-                    SELECT id, title, content, timestamp, importance, scope
-                    FROM mode_memories
-                    WHERE umo = ?
-                      AND (
-                        scope = ?
-                        OR (scope = ? AND mode = ?)
-                        OR (scope = ? AND mode = ?)
-                      )
-                    """
-                )
-
-                if strategy == "importance":
-                    query += " ORDER BY importance DESC, id DESC LIMIT ?"
-                else:
-                    query += " ORDER BY id DESC LIMIT ?"
-
-                cursor.execute(
-                    query,
-                    (
-                        umo,
-                        SCOPE_GLOBAL,
-                        SCOPE_MODE,
-                        mode,
-                        SCOPE_SESSION,
-                        mode,
-                        max(1, int(limit)),
-                    ),
-                )
-                return [self._row_to_memory(row) for row in cursor.fetchall()]
-
-        try:
-            return await asyncio.to_thread(_get)
-        except Exception as exc:
-            self.logger.error(f"Failed to get recent memories: {exc}")
-            return []
+        safe_limit = max(1, self._safe_int(limit, 5))
+        layers = await self.get_layered_memories(
+            umo,
+            mode,
+            global_limit=safe_limit,
+            mode_limit=safe_limit,
+            session_limit=safe_limit,
+        )
+        merged = layers.get(SCOPE_GLOBAL, []) + layers.get(SCOPE_MODE, []) + layers.get(SCOPE_SESSION, [])
+        if strategy == "recent":
+            merged.sort(key=lambda item: self._safe_int(item.get("id"), 0), reverse=True)
+        else:
+            merged.sort(
+                key=lambda item: (
+                    self._normalize_importance(item.get("importance", 5)),
+                    self._safe_int(item.get("id"), 0),
+                ),
+                reverse=True,
+            )
+        return merged[:safe_limit]
 
     async def remove_memory(self, umo: str, mem_id: int) -> bool:
         def _remove() -> bool:
@@ -254,6 +718,54 @@ class MemoryManager:
         except Exception as exc:
             self.logger.error(f"Failed to remove memory: {exc}")
             return False
+
+    async def clear_memories(self, umo: str, mode: Optional[str] = None, scope: Optional[str] = None) -> int:
+        safe_scope = self._normalize_scope(scope) if scope else None
+        safe_mode = str(mode or "").strip().lower()
+
+        def _clear() -> int:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                query = "DELETE FROM mode_memories WHERE umo = ?"
+                params: List[Any] = [umo]
+
+                if safe_scope:
+                    query += " AND scope = ?"
+                    params.append(safe_scope)
+
+                if safe_mode and safe_scope != SCOPE_GLOBAL:
+                    query += " AND mode = ?"
+                    params.append(safe_mode)
+
+                cursor.execute(query, tuple(params))
+                conn.commit()
+                return int(cursor.rowcount)
+
+        try:
+            return await asyncio.to_thread(_clear)
+        except Exception as exc:
+            self.logger.error(f"Failed to clear memories: {exc}")
+            return 0
+
+    async def mark_memories_used(self, memory_ids: Sequence[int]) -> int:
+        safe_ids = [max(0, self._safe_int(i, 0)) for i in memory_ids if self._safe_int(i, 0) > 0]
+        if not safe_ids:
+            return 0
+
+        def _mark() -> int:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                placeholders = ",".join("?" for _ in safe_ids)
+                query = f"UPDATE mode_memories SET last_used_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})"
+                cursor.execute(query, tuple(safe_ids))
+                conn.commit()
+                return int(cursor.rowcount)
+
+        try:
+            return await asyncio.to_thread(_mark)
+        except Exception as exc:
+            self.logger.error(f"Failed to mark memories used: {exc}")
+            return 0
 
     async def get_memory_total(self, umo: str) -> int:
         def _count() -> int:
@@ -278,28 +790,15 @@ class MemoryManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 query = (
-                    "SELECT id, mode, scope, title, content, importance, timestamp "
-                    "FROM mode_memories WHERE umo = ? "
-                    "ORDER BY importance DESC, id DESC"
+                    "SELECT id, mode, scope, title, content, timestamp, importance, period_id, source "
+                    "FROM mode_memories WHERE umo = ? ORDER BY importance DESC, id DESC"
                 )
                 params: List[Any] = [umo]
                 if source_limit is not None:
                     query += " LIMIT ?"
-                    params.append(max(1, int(source_limit)))
+                    params.append(max(1, self._safe_int(source_limit, 300)))
                 cursor.execute(query, tuple(params))
-                rows = cursor.fetchall()
-                return [
-                    {
-                        "id": row[0],
-                        "mode": row[1],
-                        "scope": row[2],
-                        "title": row[3],
-                        "content": row[4],
-                        "importance": row[5],
-                        "timestamp": row[6],
-                    }
-                    for row in rows
-                ]
+                return [self._row_to_memory(row) for row in cursor.fetchall()]
 
         try:
             return await asyncio.to_thread(_get)
@@ -327,12 +826,18 @@ class MemoryManager:
                     title = str(item.get("title", "")).strip()
                     content = str(item.get("content", "")).strip()
                     importance = self._normalize_importance(item.get("importance", 5))
+                    period_id = max(0, self._safe_int(item.get("period_id"), 0))
+                    source = str(item.get("source", "autodream")).strip() or "autodream"
                     if not title or not content:
                         continue
 
                     cursor.execute(
-                        "INSERT INTO mode_memories (umo, mode, title, content, importance, scope) VALUES (?, ?, ?, ?, ?, ?)",
-                        (umo, mode, title, content, importance, scope),
+                        (
+                            "INSERT INTO mode_memories "
+                            "(umo, mode, title, content, importance, scope, period_id, source) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                        ),
+                        (umo, mode, title, content, importance, scope, period_id, source),
                     )
 
                 conn.commit()
@@ -455,25 +960,103 @@ class MemoryManager:
         return []
 
     async def _memory_exists(self, umo: str, mode: str, scope: str, title: str, content: str) -> bool:
+        normalized_scope = self._normalize_scope(scope)
+
         def _exists() -> bool:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM mode_memories
-                    WHERE umo = ?
-                      AND mode = ?
-                      AND scope = ?
-                      AND title = ?
-                      AND content = ?
-                    LIMIT 1
-                    """,
-                    (umo, mode, scope, title, content),
-                )
+                if normalized_scope == SCOPE_GLOBAL:
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM mode_memories
+                        WHERE umo = ?
+                          AND scope = ?
+                          AND title = ?
+                          AND content = ?
+                        LIMIT 1
+                        """,
+                        (umo, normalized_scope, title, content),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM mode_memories
+                        WHERE umo = ?
+                          AND mode = ?
+                          AND scope = ?
+                          AND title = ?
+                          AND content = ?
+                        LIMIT 1
+                        """,
+                        (umo, mode, normalized_scope, title, content),
+                    )
                 return cursor.fetchone() is not None
 
         return await asyncio.to_thread(_exists)
+
+    def _reclassify_scope(self, suggested_scope: str, title: str, content: str) -> str:
+        scope = self._normalize_scope(suggested_scope)
+        text = f"{title} {content}".lower()
+
+        global_keywords = (
+            "always",
+            "长期",
+            "长期偏好",
+            "习惯",
+            "人设",
+            "身份",
+            "生日",
+            "姓名",
+            "偏好",
+            "禁忌",
+            "原则",
+            "长期",
+            "总是",
+            "永远",
+        )
+        mode_keywords = (
+            "工作模式",
+            "休息模式",
+            "work mode",
+            "rest mode",
+            "项目",
+            "流程",
+            "规则",
+            "风格",
+            "工作中",
+            "休息时",
+        )
+        session_keywords = (
+            "今天",
+            "这次",
+            "刚刚",
+            "当前",
+            "本轮",
+            "临时",
+            "稍后",
+            "待办",
+            "this round",
+            "today",
+            "temporary",
+            "current task",
+        )
+
+        has_global = any(k in text for k in global_keywords)
+        has_mode = any(k in text for k in mode_keywords)
+        has_session = any(k in text for k in session_keywords)
+
+        if has_global and not has_session:
+            return SCOPE_GLOBAL
+        if has_mode and not has_global and scope == SCOPE_SESSION:
+            return SCOPE_MODE
+        if has_session and not has_global and not has_mode:
+            return SCOPE_SESSION
+
+        if scope == SCOPE_GLOBAL and has_session and not has_global:
+            return SCOPE_MODE
+        return scope
 
     async def trigger_summary_and_save(
         self,
@@ -484,21 +1067,27 @@ class MemoryManager:
         history_limit: Optional[int] = 40,
         message_char_limit: int = 220,
         total_char_limit: int = 4800,
-    ):
+        period_id: int = 0,
+        source: str = "summary",
+    ) -> Dict[str, Any]:
         if not history_contexts:
-            return
+            return {"status": "empty_history", "added": 0, "parsed": 0}
 
         try:
             provider_id = await context.get_current_chat_provider_id(umo)
             if not provider_id:
                 self.logger.warning(f"[Memory] No provider for {umo}")
-                return
+                return {"status": "no_provider", "added": 0, "parsed": 0}
 
             system_prompt = (
                 "你是记忆提取器。仅提取可复用事实，忽略寒暄、重复和一次性细节。\n"
-                "按 scope 输出 JSON 数组，scope 只能是 global/mode/session。\n"
-                "importance 为 1-10 的整数，只输出 JSON，不要解释。\n"
-                "元素格式：{\"scope\":\"global\",\"title\":\"...\",\"content\":\"...\",\"importance\":8}"
+                "必须输出 JSON 数组，元素字段为 scope/title/content/importance。\n"
+                "scope 只能是 global/mode/session，分类标准如下：\n"
+                "- global: 跨模式长期稳定事实，如用户长期偏好、身份、禁忌。\n"
+                "- mode: 仅在当前工作或休息模式长期有用的规则与上下文。\n"
+                "- session: 仅当前阶段短期有用、后续可能失效的信息。\n"
+                "importance 为 1-10 整数，只输出 JSON，不要解释。\n"
+                "元素格式：{\"scope\":\"global|mode|session\",\"title\":\"...\",\"content\":\"...\",\"importance\":8}"
             )
 
             history_text = self._build_history_text(
@@ -508,31 +1097,46 @@ class MemoryManager:
                 total_char_limit,
             )
             if not history_text or len(history_text) < 20:
-                return
+                return {"status": "history_too_short", "added": 0, "parsed": 0}
+
             response = await context.llm_generate(
                 chat_provider_id=provider_id,
                 system_prompt=system_prompt,
-                prompt=f"请提取三层记忆为 JSON：\n{history_text}",
+                prompt=(
+                    "请提取三层记忆为 JSON。请尽量区分长期(global)、模式长期(mode)、短期(session)：\n"
+                    + history_text
+                ),
             )
 
             text_result = self._strip_markdown_code_fence(getattr(response, "completion_text", ""))
             items = self._parse_memory_items(text_result)
             if not items:
-                return
+                return {"status": "no_output", "added": 0, "parsed": 0}
+
+            parsed = 0
+            added = 0
+            skipped_exists = 0
+            skipped_invalid = 0
 
             for item in items:
                 title = str(item.get("title", "")).strip()
                 content = str(item.get("content", "")).strip()
-                scope = self._normalize_scope(str(item.get("scope", SCOPE_MODE)))
+                raw_scope = str(item.get("scope", SCOPE_MODE))
+                scope = self._normalize_scope(raw_scope)
+                scope = self._reclassify_scope(scope, title, content)
                 importance = self._normalize_importance(item.get("importance", 5))
 
                 if not title or not content:
+                    skipped_invalid += 1
                     continue
                 if title.lower() == "none" or content.lower() == "none":
+                    skipped_invalid += 1
                     continue
 
+                parsed += 1
                 exists = await self._memory_exists(umo, mode, scope, title, content)
                 if exists:
+                    skipped_exists += 1
                     continue
 
                 mem_id = await self.add_memory(
@@ -542,14 +1146,30 @@ class MemoryManager:
                     content=content,
                     importance=importance,
                     scope=scope,
+                    period_id=period_id,
+                    source=source,
                 )
-                self.logger.info(
-                    f"[Memory] Added scope={scope} id={mem_id} importance={importance} mode={mode} title={title}"
-                )
+                if mem_id > 0:
+                    added += 1
+                    self.logger.info(
+                        f"[Memory] Added scope={scope} id={mem_id} importance={importance} mode={mode} period={period_id} title={title}"
+                    )
+
+            return {
+                "status": "ok" if added > 0 else "no_new",
+                "added": added,
+                "parsed": parsed,
+                "skipped_exists": skipped_exists,
+                "skipped_invalid": skipped_invalid,
+                "period_id": max(0, self._safe_int(period_id, 0)),
+                "source": source,
+            }
         except json.JSONDecodeError:
             self.logger.warning("[Memory] LLM summary output is not valid JSON")
+            return {"status": "bad_json", "added": 0, "parsed": 0}
         except Exception:
             self.logger.exception(f"[Memory] Error during summary for mode={mode}")
+            return {"status": "error", "added": 0, "parsed": 0}
 
     async def autodream_compact(
         self,
@@ -587,8 +1207,11 @@ class MemoryManager:
                 if not title or not content:
                     continue
                 lines.append(
-                    f"[id={item.get('id')}|mode={item.get('mode')}|scope={item.get('scope')}|importance={item.get('importance')}] "
-                    f"{title}: {content}"
+                    (
+                        f"[id={item.get('id')}|mode={item.get('mode')}|scope={item.get('scope')}"
+                        f"|importance={item.get('importance')}|period={item.get('period_id')}] "
+                        f"{title}: {content}"
+                    )
                 )
 
             if not lines:
@@ -647,6 +1270,7 @@ class MemoryManager:
                         "title": title,
                         "content": content,
                         "importance": importance,
+                        "source": "autodream",
                     }
                 )
                 if len(compacted) >= safe_retain:
@@ -659,10 +1283,45 @@ class MemoryManager:
             if after_total < 0:
                 return {"status": "replace_failed", "before": before_total, "after": before_total}
 
-            return {"status": "ok", "before": before_total, "after": after_total}
+            return {
+                "status": "ok",
+                "before": before_total,
+                "after": after_total,
+                "retained": len(compacted),
+            }
         except json.JSONDecodeError:
             self.logger.warning("[AutoDream] LLM output is not valid JSON")
             return {"status": "bad_json", "before": before_total, "after": before_total}
         except Exception:
             self.logger.exception(f"[AutoDream] Error during compaction for umo={umo}")
             return {"status": "error", "before": before_total, "after": before_total}
+
+    async def run_compaction_if_needed(
+        self,
+        context: Any,
+        umo: str,
+        mode: str,
+        enabled: bool,
+        total_threshold: int,
+        retain_count: int,
+        source_limit: int,
+    ) -> Dict[str, Any]:
+        if not enabled:
+            return {"status": "disabled"}
+
+        total = await self.get_memory_total(umo)
+        if total < max(1, self._safe_int(total_threshold, 1)):
+            return {
+                "status": "below_threshold",
+                "before": total,
+                "after": total,
+                "threshold": max(1, self._safe_int(total_threshold, 1)),
+            }
+
+        return await self.autodream_compact(
+            context=context,
+            umo=umo,
+            mode=mode,
+            retain_count=max(5, self._safe_int(retain_count, 60)),
+            source_limit=max(20, self._safe_int(source_limit, 180)),
+        )
